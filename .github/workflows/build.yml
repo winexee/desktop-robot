@@ -1,0 +1,31 @@
+name: Build Windows EXE
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Python Kurulumu
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        
+    - name: Kütüphaneleri Yükle
+      run: |
+        python -m pip install --upgrade pip
+        pip install pyinstaller PyQt6
+        
+    - name: EXE Oluştur
+      run: pyinstaller --noconfirm --onefile --windowed --add-data "assets;assets" main.py
+      
+    - name: EXE Dosyasını Sun
+      uses: actions/upload-artifact@v4
+      with:
+        name: Masaustu-Robot-Supurge
+        path: dist/main.exe
