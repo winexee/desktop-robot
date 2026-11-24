@@ -1,39 +1,41 @@
 """
-Masaüstü Robot Süpürge — Şeffaf Overlay & Robot Animasyonu
+Masaüstü Robot Süpürge -- Şeffaf Overlay & Robot Animasyonu
 ===========================================================
 
 QPainter Kuralları (hata önleme)
 ---------------------------------
-  • QPainter YALNIZCA paintEvent içinde, TEK seferlik oluşturulur.
-  • Her alt çizim metodu var olan painter'ı argüman olarak alır —
+  - QPainter YALNIZCA paintEvent içinde, TEK seferlik oluşturulur.
+  - Her alt çizim metodu var olan painter'ı argüman olarak alır;
     kendi painter'ını yaratmaz.
-  • Transform/opacity değiştiren her blok kendi save()/restore() çiftine
-    sahiptir. setOpacity() kullanılmaz; alpha manuel hesaplanır.
-  • Scaled pixmap her frame yeniden ölçeklenmez; boyut değişince cache güncellenir.
-  • Konuşma balonunun QPainterPath'i _tick() içinde (paintEvent dışında)
+  - Transform/opacity değiştiren her blok kendi save()/restore() çiftine
+    sahiptir.
+  - Scaled pixmap her frame yeniden ölçeklenmez; boyut değişince cache güncellenir.
+  - Konuşma balonunun QPainterPath'i _tick() içinde (paintEvent dışında)
     hesaplanır, paintEvent sadece çizer.
 
 Sinyaller
 ----------
-  settings_requested  → Controller ayarlar penceresini açar
-  target_reached(int) → Controller o indeksteki dosyayı taşır
-  all_targets_done(int) → Controller raporu gösterir
+  settings_requested    -> Controller ayarlar penceresini açar
+  target_reached(int)   -> Controller o indeksteki dosyayı taşır
+  all_targets_done(int) -> Controller raporu gösterir
+  cancel_requested      -> Controller temizleme işlemini iptal eder
 """
 
 from __future__ import annotations
 
 import math
-import pathlib
 import random
 from typing import Optional
 
-from PyQt6.QtCore import Qt, QTimer, QPointF, QRectF, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, QPointF, QRect, QRectF, pyqtSignal
 from PyQt6.QtGui import (
     QPainter, QPainterPath,
     QColor, QBrush, QPen, QFont, QFontMetrics,
     QRadialGradient, QPixmap,
 )
 from PyQt6.QtWidgets import QApplication, QWidget
+
+import config
 
 
 # ---------------------------------------------------------------------------
@@ -44,21 +46,19 @@ _BUBBLE_LIFETIME   = 150   # frame (~2.5 sn @ 60fps)
 _BUBBLE_FADE_FRAME = 20    # fade-in / fade-out süresi
 
 BUBBLE_PHRASES: list[str] = [
-    "Nom nom! 😋",
+    "Nom nom!",
     "Hapur hupur!",
     "Ne kadar çok dosya...",
     "Burası çok dağılmış!",
     "Temizlik zamanı!",
-    "Ben süpürüyorum! 🧹",
-    "Bu da gitti~",
+    "Bu da gitti.",
     "Çöp mü? Çöp!",
     "Hızlıyım ben!",
     "Bir tane daha!",
     "Masaüstü tertemiz olacak.",
     "Yum yum yum...",
-    "Vızzz vızzz~",
+    "Vızzz vızzz...",
     "Duramam, durmam!",
-    "İşte bu kadar sıranlı olmaz.",
 ]
 
 
@@ -138,6 +138,7 @@ class RobotOverlay(QWidget):
     settings_requested = pyqtSignal()
     target_reached     = pyqtSignal(int)   # indeks
     all_targets_done   = pyqtSignal(int)   # toplam sayı
+    cancel_requested   = pyqtSignal()      # ESC ile iptal
 
     # -------------------------------------------------------------------
     # Başlangıç
@@ -161,10 +162,14 @@ class RobotOverlay(QWidget):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
-        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
 
-        geo = QApplication.primaryScreen().geometry()
+        # Multi-monitor / DPI safety (asla None üzerinden çökme yok)
+        screen = QApplication.primaryScreen()
+        if screen is None and QApplication.screens():
+            screen = QApplication.screens()[0]
+        geo = screen.availableGeometry() if screen else QRect(0, 0, 1920, 1080)
+
         self.setGeometry(geo)
         self._screen_w = geo.width()
         self._screen_h = geo.height()
@@ -174,18 +179,18 @@ class RobotOverlay(QWidget):
     # -------------------------------------------------------------------
 
     def _init_robot(self) -> None:
-        # Pozisyon & yön
+        # Pozisyon & yön (boşta yukarı bakar)
         self._rx: float    = self._screen_w / 2.0
         self._ry: float    = self._screen_h - 120.0
-        self._robot_size   = 64
-        self._angle: float = 0.0
+        self._robot_size   = config.ROBOT_SIZE
+        self._angle: float = -90.0
 
-        # Hedef kuyruğu
+        # Durum & hedef kuyruğu (başlangıçta boşta -> %0 CPU)
+        self._idle:       bool          = True
         self._targets:    list[QPointF] = []
         self._target_idx: int           = 0
         self._labels:     list[str]     = []
         self._done_count: int           = 0
-        self._demo_mode:  bool          = True
         self._finished:   bool          = False
 
         # Yutma animasyonu
@@ -199,39 +204,20 @@ class RobotOverlay(QWidget):
         self._dust_timer: int            = 0
 
         # Durum metni
-        self._status: str = "🤖  Hazırlanıyor..."
+        self._status: str = "Hazırlanıyor..."
 
-        # Demo konumları
-        self._generate_demo_targets()
-
-        # PNG pixmap (yoksa None → geometrik çizim)
+        # PNG pixmap (yoksa None -> geometrik çizim)
         self._robot_pixmap: Optional[QPixmap] = self._load_robot_pixmap()
         self._cached_px:    Optional[QPixmap] = None   # ölçeklenmiş önbellek
         self._cached_px_sz: int               = 0
 
         # Konuşma balonu (paintEvent dışında hesaplanır)
-        self._bubble_text:    str              = ""
-        self._bubble_life:    int              = 0
-        self._bubble_alpha:   float            = 0.0   # 0.0–1.0
-        self._bubble_path:    Optional[QPainterPath] = None
-        self._bubble_txt_rect: QRectF          = QRectF()
-        self._bubble_font:    QFont            = QFont("Segoe UI", 11, QFont.Weight.Bold)
-
-    # -------------------------------------------------------------------
-    # Demo hedefleri
-    # -------------------------------------------------------------------
-
-    def _generate_demo_targets(self) -> None:
-        mx = int(self._screen_w * 0.12)
-        my = int(self._screen_h * 0.12)
-        pts: list[QPointF] = []
-        for row in range(4):
-            for col in range(5):
-                x = mx + col * (self._screen_w - 2 * mx) / 4
-                y = my + row * (self._screen_h - 2 * my) / 3
-                pts.append(QPointF(x, y))
-        random.shuffle(pts)
-        self._targets = pts
+        self._bubble_text:     str                    = ""
+        self._bubble_life:     int                    = 0
+        self._bubble_alpha:    float                  = 0.0   # 0.0-1.0
+        self._bubble_path:     Optional[QPainterPath] = None
+        self._bubble_txt_rect: QRectF                 = QRectF()
+        self._bubble_font:     QFont                  = QFont("Segoe UI", 11, QFont.Weight.Bold)
 
     # -------------------------------------------------------------------
     # PNG yükleme
@@ -239,7 +225,7 @@ class RobotOverlay(QWidget):
 
     @staticmethod
     def _load_robot_pixmap() -> Optional[QPixmap]:
-        png = pathlib.Path(__file__).parent / "assets" / "robot_supurge.png"
+        png = config.get_asset_path("robot_supurge.png")
         if png.exists():
             px = QPixmap(str(png))
             if not px.isNull():
@@ -260,20 +246,97 @@ class RobotOverlay(QWidget):
         return self._cached_px
 
     # -------------------------------------------------------------------
-    # Dışarıdan enjeksiyon
+    # Dışarıdan enjeksiyon & durum yönetimi
     # -------------------------------------------------------------------
 
+    def set_idle(self, status: str = "") -> None:
+        """Robotu boşta (idle) moda geçir ve zamanlayıcıyı durdur (%0 CPU)."""
+        self._idle         = True
+        self._finished     = False
+        self._eating       = False
+        self._eat_phase    = 0
+        self._eat_scale    = 1.0
+        self._targets      = []
+        self._labels       = []
+        self._target_idx   = 0
+        self._done_count   = 0
+        self._particles.clear()
+        self._dust.clear()
+        self._bubble_text  = ""
+        self._bubble_life  = 0
+        self._bubble_alpha = 0.0
+        self._bubble_path  = None
+        if status:
+            self._status = status
+        if hasattr(self, "_timer"):
+            self._timer.stop()
+        self.update()
+
     def set_targets(self, positions: list[QPointF], labels: list[str]) -> None:
-        self._demo_mode   = False
-        self._targets     = list(positions)
-        self._labels      = list(labels)
-        self._target_idx  = 0
-        self._done_count  = 0
-        self._finished    = False
-        self._status      = f"📂  {len(positions)} dosya bulundu — temizlik başlıyor!"
+        """Hedef listesini ayarla, ekran sınırlarına clamp et ve animasyonu başlat."""
+        self._idle       = False
+        self._finished   = False
+        self._eating     = False
+        self._eat_phase  = 0
+        self._eat_scale  = 1.0
+        self._particles.clear()
+        self._dust.clear()
+        self._bubble_text  = ""
+        self._bubble_life  = 0
+        self._bubble_alpha = 0.0
+        self._bubble_path  = None
+
+        margin_x     = min(40.0, self._screen_w / 4.0)
+        margin_y_top = min(40.0, self._screen_h / 4.0)
+        margin_y_bot = min(90.0, self._screen_h / 3.0)
+        max_x        = max(margin_x, self._screen_w - margin_x)
+        max_y        = max(margin_y_top, self._screen_h - margin_y_bot)
+
+        clamped: list[QPointF] = [
+            QPointF(
+                max(margin_x, min(pos.x(), max_x)),
+                max(margin_y_top, min(pos.y(), max_y)),
+            )
+            for pos in positions
+        ]
+
+        self._targets    = clamped
+        self._labels     = list(labels)
+        self._target_idx = 0
+        self._done_count = 0
+        self._status     = f"{len(clamped)} dosya bulundu -- temizlik başlıyor!"
+
+        if not clamped:
+            self._finished = True
+            self._timer.stop()
+            self.update()
+            self.all_targets_done.emit(0)
+            return
+
+        if not self.isHidden():
+            self._timer.start()
+        self.update()
 
     def set_status(self, text: str) -> None:
+        """Düz metin durum mesajını sakla ve yeniden çiz."""
         self._status = text
+        self.update()
+
+    def cancel(self) -> None:
+        """Animasyonu temizce durdur ve zamanlayıcıyı kapat."""
+        self._finished     = True
+        self._eating       = False
+        self._eat_phase    = 0
+        self._eat_scale    = 1.0
+        self._bubble_text  = ""
+        self._bubble_life  = 0
+        self._bubble_alpha = 0.0
+        self._bubble_path  = None
+        self._particles.clear()
+        self._dust.clear()
+        self._status       = "Temizlik iptal edildi."
+        self._timer.stop()
+        self.update()
 
     # -------------------------------------------------------------------
     # Animasyon kurulumu
@@ -282,23 +345,50 @@ class RobotOverlay(QWidget):
     def _init_animation(self) -> None:
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
-        self._timer.setInterval(16)   # ~60 fps
-        self._timer.start()
+        self._timer.setInterval(16)   # ~60 fps; boşta durur
 
     # -------------------------------------------------------------------
-    # Ana döngü  (paintEvent DIŞINDA — sadece veri günceller)
+    # Show / Hide: idle CPU optimizasyonu
+    # -------------------------------------------------------------------
+
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        if not self._idle and not self._finished:
+            self._timer.start()
+        self.update()
+
+    def hideEvent(self, event) -> None:  # type: ignore[override]
+        super().hideEvent(event)
+        self._timer.stop()
+
+    # -------------------------------------------------------------------
+    # Ana döngü  (paintEvent DIŞINDA -- sadece veri günceller)
     # -------------------------------------------------------------------
 
     def _tick(self) -> None:
         """Tüm durum güncellemeleri burada. Çizim yok."""
+        if self._idle or self.isHidden():
+            self._timer.stop()
+            return
+
         if self._eating:
             self._update_eat_anim()
-        else:
+        elif not self._finished:
             self._move_robot()
 
         self._update_bubble()      # QPainterPath hesapla (paintEvent değil)
         self._update_particles()
         self._update_dust()
+
+        if (
+            self._finished
+            and not self._eating
+            and not self._particles
+            and not self._dust
+            and self._bubble_life <= 0
+        ):
+            self._timer.stop()
+
         self.update()              # Qt'ya "yeniden çiz" sinyali gönder
 
     # -------------------------------------------------------------------
@@ -309,19 +399,14 @@ class RobotOverlay(QWidget):
         if self._target_idx >= len(self._targets):
             if not self._finished:
                 self._finished = True
-                if self._demo_mode:
-                    random.shuffle(self._targets)
-                    self._target_idx = 0
-                    self._finished   = False
-                else:
-                    self._status = f"✅  {self._done_count} dosya temizlendi!"
-                    self.all_targets_done.emit(self._done_count)
+                self._status   = f"{self._done_count} dosya temizlendi!"
+                self.all_targets_done.emit(self._done_count)
             return
 
         target = self._targets[self._target_idx]
-        dx   = target.x() - self._rx
-        dy   = target.y() - self._ry
-        dist = math.hypot(dx, dy)
+        dx     = target.x() - self._rx
+        dy     = target.y() - self._ry
+        dist   = math.hypot(dx, dy)
 
         if dist > 1.0:
             self._angle = math.degrees(math.atan2(dy, dx))
@@ -341,13 +426,14 @@ class RobotOverlay(QWidget):
             self._start_eat()
             self._show_bubble(random.choice(BUBBLE_PHRASES))
 
-            if not self._demo_mode:
-                label = (self._labels[reached_idx]
-                         if reached_idx < len(self._labels) else "")
-                self._status = f"🍽️  Yutuldu: {label}"
-                self.target_reached.emit(reached_idx)
+            label = (
+                self._labels[reached_idx]
+                if reached_idx < len(self._labels) else ""
+            )
+            self._status = f"Yutuldu: {label}"
+            self.target_reached.emit(reached_idx)
         else:
-            speed     = max(2.0, min(6.0, dist * 0.08))
+            speed     = max(config.ROBOT_SPEED_MIN, min(config.ROBOT_SPEED_MAX, dist * 0.08))
             self._rx += (dx / dist) * speed
             self._ry += (dy / dist) * speed
             # Hareket esnasında %0.3 ihtimalle balon
@@ -372,7 +458,7 @@ class RobotOverlay(QWidget):
             self._eat_scale = 1.0
 
     # -------------------------------------------------------------------
-    # Konuşma balonu — HESAPLAMA (_tick içinde çağrılır)
+    # Konuşma balonu -- HESAPLAMA (_tick içinde çağrılır)
     # -------------------------------------------------------------------
 
     def _show_bubble(self, text: str) -> None:
@@ -393,12 +479,10 @@ class RobotOverlay(QWidget):
         self._rebuild_bubble_path()   # robot hareket ettiği için path güncelle
 
         if self._bubble_life > _BUBBLE_LIFETIME - _BUBBLE_FADE_FRAME:
-            # Fade-in
             self._bubble_alpha = (
                 (_BUBBLE_LIFETIME - self._bubble_life) / _BUBBLE_FADE_FRAME
             )
         elif self._bubble_life < _BUBBLE_FADE_FRAME:
-            # Fade-out
             self._bubble_alpha = self._bubble_life / _BUBBLE_FADE_FRAME
         else:
             self._bubble_alpha = 1.0
@@ -406,7 +490,7 @@ class RobotOverlay(QWidget):
     def _rebuild_bubble_path(self) -> None:
         """
         Ekran koordinatlarında QPainterPath oluştur.
-        paintEvent dışında çağrılır — QPainter gerektirmez.
+        paintEvent dışında çağrılır -- QPainter gerektirmez.
         """
         if not self._bubble_text:
             self._bubble_path = None
@@ -435,8 +519,8 @@ class RobotOverlay(QWidget):
         bx = max(margin, min(bx, self._screen_w - bw - margin))
         by = max(margin, by)
 
-        # Kuyruk ucu → robotun tam üstü
-        tip_x  = self._rx
+        # Kuyruk ucu -> robotun tam üstü
+        tip_x      = self._rx
         tail_top_y = by + bh
 
         # Kuyruk tabanı (balonun alt kenarında)
@@ -473,7 +557,7 @@ class RobotOverlay(QWidget):
         self._dust = [d for d in self._dust if d.alive]
 
     # ===================================================================
-    # paintEvent — TEK QPainter, TÜM ÇİZİM BURADA
+    # paintEvent -- TEK QPainter, TÜM ÇİZİM BURADA
     # ===================================================================
 
     def paintEvent(self, _event) -> None:  # type: ignore[override]
@@ -491,7 +575,7 @@ class RobotOverlay(QWidget):
             painter.end()   # hata olsa bile her zaman sonlandır
 
     # -------------------------------------------------------------------
-    # Çizim — toz izi
+    # Çizim -- toz izi
     # -------------------------------------------------------------------
 
     def _paint_dust(self, p: QPainter) -> None:
@@ -505,7 +589,7 @@ class RobotOverlay(QWidget):
         p.restore()
 
     # -------------------------------------------------------------------
-    # Çizim — parçacıklar
+    # Çizim -- parçacıklar
     # -------------------------------------------------------------------
 
     def _paint_particles(self, p: QPainter) -> None:
@@ -520,7 +604,7 @@ class RobotOverlay(QWidget):
         p.restore()
 
     # -------------------------------------------------------------------
-    # Çizim — robot
+    # Çizim -- robot
     # -------------------------------------------------------------------
 
     def _paint_robot(self, p: QPainter) -> None:
@@ -614,7 +698,7 @@ class RobotOverlay(QWidget):
             p.setPen(Qt.PenStyle.NoPen)
             p.drawEllipse(QRectF(ex - eye_r*2, eye_y - eye_r*2, eye_r*4, eye_r*4))
             p.restore()
-            # Iris
+            # İris
             p.save()
             p.setBrush(QBrush(QColor(50, 220, 255)))
             p.setPen(QPen(QColor(20, 160, 200), 1))
@@ -632,21 +716,21 @@ class RobotOverlay(QWidget):
             p.restore()
 
     # -------------------------------------------------------------------
-    # Çizim — konuşma balonu
+    # Çizim -- konuşma balonu
     # -------------------------------------------------------------------
 
     def _paint_bubble(self, p: QPainter) -> None:
         """
         Önceden hesaplanmış _bubble_path'i çizer.
-        setOpacity() KULLANILMAZ — renkler manuel alpha ile oluşturulur.
+        Renkler manuel alpha ile oluşturulur.
         """
         if self._bubble_path is None or self._bubble_alpha <= 0.0:
             return
 
-        a    = self._bubble_alpha       # 0.0–1.0
+        a    = self._bubble_alpha       # 0.0-1.0
         path = self._bubble_path
 
-        # ── Gölge (kendi save/restore bloğunda translate) ──
+        # Gölge (kendi save/restore bloğunda translate)
         p.save()
         p.translate(2.0, 3.0)
         p.setPen(Qt.PenStyle.NoPen)
@@ -654,14 +738,14 @@ class RobotOverlay(QWidget):
         p.drawPath(path)
         p.restore()
 
-        # ── Balon gövdesi ──
+        # Balon gövdesi
         p.save()
         p.setBrush(QBrush(QColor(255, 255, 255, int(242 * a))))
         p.setPen(QPen(QColor(90, 110, 180, int(160 * a)), 1.5))
         p.drawPath(path)
         p.restore()
 
-        # ── Metin ──
+        # Metin
         p.save()
         p.setFont(self._bubble_font)
         p.setPen(QPen(QColor(28, 32, 58, int(255 * a))))
@@ -673,21 +757,27 @@ class RobotOverlay(QWidget):
         p.restore()
 
     # -------------------------------------------------------------------
-    # Çizim — alt durum metni
+    # Çizim -- alt durum metni
     # -------------------------------------------------------------------
 
     def _paint_status(self, p: QPainter) -> None:
+        if not self._status:
+            return
+
         font = QFont("Segoe UI", 11) if self._screen_w > 1920 else QFont("Sans", 10)
         font.setBold(True)
         p.setFont(font)
         fm = QFontMetrics(font)
 
-        text   = self._status
-        pad_x  = 20
-        pad_y  = 10
+        pad_x      = 20
+        pad_y      = 10
+        max_pill_w = max(80, self._screen_w - 40)
+        max_text_w = max(20, max_pill_w - pad_x * 2)
+
+        text   = fm.elidedText(self._status, Qt.TextElideMode.ElideRight, max_text_w)
         tw     = fm.horizontalAdvance(text)
         th     = fm.height()
-        pill_w = tw + pad_x * 2
+        pill_w = min(tw + pad_x * 2, max_pill_w)
         pill_h = th + pad_y * 2
         pill_x = (self._screen_w - pill_w) / 2
         pill_y = self._screen_h - pill_h - 24
@@ -698,7 +788,7 @@ class RobotOverlay(QWidget):
         p.drawRoundedRect(QRectF(pill_x, pill_y, pill_w, pill_h),
                           pill_h / 2, pill_h / 2)
         p.setPen(QPen(QColor(230, 230, 240)))
-        p.drawText(QRectF(pill_x, pill_y, pill_w, pill_h),
+        p.drawText(QRectF(pill_x + pad_x, pill_y, pill_w - pad_x * 2, pill_h),
                    Qt.AlignmentFlag.AlignCenter, text)
         p.restore()
 
@@ -708,5 +798,9 @@ class RobotOverlay(QWidget):
 
     def keyPressEvent(self, event) -> None:  # type: ignore[override]
         if event.key() == Qt.Key.Key_Escape:
-            self._timer.stop()
-            self.close()
+            if not self._idle and not self._finished:
+                self.cancel()
+                self.cancel_requested.emit()
+                event.accept()
+                return
+        super().keyPressEvent(event)

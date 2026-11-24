@@ -1,188 +1,515 @@
 """
-Masaüstü Robot Süpürge — Dosya Taşıyıcı (QThread)
+Masaüstü Robot Süpürge - Dosya Taşıyıcı (QThread)
 ===================================================
 Dosya taşıma/silme işlemini arka plan thread'inde çalıştırır.
 UI donmaz; her işlem sonrası sinyal gönderir.
 
 AppSettings entegrasyonu
 ------------------------
-  category_rules["Kategori"] = "move"   → kategorize klasöre taşı
-  category_rules["Kategori"] = "delete" → kalıcı sil
-  category_rules["Kategori"] = "skip"   → dokunma, atla
+  category_rules["Kategori"] = "move"   -> kategorize klasöre taşı
+  category_rules["Kategori"] = "trash"  -> geri dönüşüm kutusuna gönder
+  category_rules["Kategori"] = "delete" -> kalıcı sil (permanent_delete_enabled gerektirir)
+  category_rules["Kategori"] = "skip"   -> dokunma, atla
 
-Sinyal akışı
-------------
-    FileMover.start()
-        → her dosya için: file_moved(item, success, error_msg)
-        → tüm dosyalar sonunda: all_done(moved_count, failed_count)
+Çalışma modları
+---------------
+  1. Toplu (batch) mod (`streaming=False`):
+     `items` listesini işler ve tamamlanınca `all_done` yayınlar.
+  2. Akış (streaming) mod (`streaming=True`):
+     Robot hedefe ulaştıkça `enqueue_item(item)` ile beslenir,
+     `finish()` veya `cancel()` çağrılınca sonlanır.
 """
 
 from __future__ import annotations
 
 import os
-import shutil
 import pathlib
+import queue
+import shutil
+import threading
+from dataclasses import dataclass
+from enum import Enum
 from typing import Optional
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
 import config
-from config import ACTION_MOVE, ACTION_DELETE, ACTION_SKIP, AppSettings
-from file_scanner import FileItem, ScanResult
+from config import (
+    ACTION_DELETE,
+    ACTION_MOVE,
+    ACTION_SKIP,
+    ACTION_TRASH,
+    AppSettings,
+)
+from file_scanner import FileItem
+
+# send2trash: zorunlu değil, yoksa Corbeille klasörüne taşınır
+try:
+    from send2trash import send2trash as _send2trash
+    HAS_SEND2TRASH = True
+except ImportError:
+    _send2trash = None  # type: ignore[assignment]
+    HAS_SEND2TRASH = False
+
+# Kuyruk sonu işaretçisi
+_END = object()
 
 
-class FileMover(QThread):
+# ---------------------------------------------------------------------------
+# Dosya işlemi sonuç türleri
+# ---------------------------------------------------------------------------
+
+class FileStatus(Enum):
+    MOVED                = "moved"
+    TRASHED              = "trashed"
+    DELETED_PERMANENTLY  = "deleted_permanently"
+    SKIPPED              = "skipped"
+    FAILED               = "failed"
+    CANCELLED            = "cancelled"
+
+
+@dataclass
+class FileResult:
+    """Tek bir dosya işleminin sonucunu tanımlar."""
+    item:      FileItem
+    status:    FileStatus
+    error_msg: str                    = ""
+    dest:      Optional[pathlib.Path] = None
+
+
+# ---------------------------------------------------------------------------
+# Arka plan iş parçacığı
+# ---------------------------------------------------------------------------
+
+class FileWorkerThread(QThread):
     """
     QThread tabanlı arka plan dosya taşıyıcı.
 
-    Parametre olarak ScanResult alır, her dosyayı kategoriye göre
-    hedef klasöre taşır. Çakışma durumunda dosya adına numara ekler.
+    Her dosya için `file_done(FileResult)` sinyali gönderir.
+    Tamamlandığında `all_done(list[FileResult])` sinyali gönderir.
     """
 
-    # Sinyal: (taşınan item, başarılı mı, hata mesajı)
-    file_moved = pyqtSignal(object, bool, str)
+    # Sinyal: tek dosya tamamlandı
+    file_done: pyqtSignal = pyqtSignal(object)      # FileResult
 
-    # Sinyal: tüm dosyalar tamamlandı (başarılı sayısı, hatalı sayısı)
-    all_done = pyqtSignal(int, int)
+    # Sinyal: tüm dosyalar tamamlandı
+    all_done: pyqtSignal = pyqtSignal(object)       # list[FileResult]
 
-    # Sinyal: anlık durum metni (status bar için)
-    status_update = pyqtSignal(str)
+    # Sinyal: anlık durum metni (durum çubuğu için)
+    status_update: pyqtSignal = pyqtSignal(str)
 
     def __init__(
         self,
-        scan_result: ScanResult,
-        settings:    Optional[AppSettings] = None,
+        items:      Optional[list[FileItem]] = None,
+        settings:   Optional[AppSettings]    = None,
+        streaming:  bool                     = False,
+        total_hint: Optional[int]            = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
-        self._result   = scan_result
-        self._settings = settings or config.get_settings()
-        self._moved    = 0
-        self._deleted  = 0
-        self._skipped  = 0
-        self._failed   = 0
-        self._running  = True
+        self._items         = list(items) if items is not None else []
+        self._settings      = settings or config.get_settings()
+        self._streaming     = streaming
+        self._total_hint    = total_hint
+        self._cancel_event  = threading.Event()
+        self._queue: queue.Queue = queue.Queue()
+        self._worker_ident: Optional[int] = None
+
+        for item in self._items:
+            self._queue.put(item)
+        if not self._streaming:
+            self._queue.put(_END)
+
+    def __del__(self) -> None:
+        """C++ nesnesi yok edilmeden once calisan thread'in bitmesini bekle."""
+        try:
+            if (
+                self.isRunning()
+                and QThread.currentThread() != self
+                and threading.get_ident() != self._worker_ident
+            ):
+                self.cancel()
+                self.wait(5000)
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
-    # Thread giriş noktası
+    # Kuyruk yönetimi (streaming modu)
+    # ------------------------------------------------------------------
+
+    def enqueue_item(self, item: FileItem) -> None:
+        """Akış modunda işlenmek üzere kuyruğa bir dosya ekle."""
+        if not self._cancel_event.is_set():
+            self._queue.put(item)
+
+    def finish(self) -> None:
+        """Akış modunda yeni dosya eklenmeyeceğini bildir."""
+        self._queue.put(_END)
+
+    # ------------------------------------------------------------------
+    # Thread girişi
     # ------------------------------------------------------------------
 
     def run(self) -> None:
-        """Her dosyayı sırayla işle; ayarlara göre taşı / sil / atla."""
-        items = self._result.items
+        """Kuyruktaki dosyaları sırayla işle; iptal edilirse kalanlar CANCELLED olur."""
+        self._worker_ident = threading.get_ident()
+        results: list[FileResult] = []
+        idx = 0
 
-        for idx, item in enumerate(items, start=1):
-            if not self._running:
+        while True:
+            raw = self._queue.get()
+            if raw is _END:
                 break
 
-            action = self._settings.category_rules.get(
-                item.category.name, ACTION_MOVE
-            )
+            idx += 1
+            item: FileItem = raw  # type: ignore[assignment]
 
-            if action == ACTION_SKIP:
-                self._skipped += 1
-                self.status_update.emit(f"⏭️  Atlandı: {item.path.name}")
-                self.file_moved.emit(item, True, "atlandı")
+            if self._cancel_event.is_set():
+                result = FileResult(
+                    item=item,
+                    status=FileStatus.CANCELLED,
+                    error_msg="Kullanıcı tarafından iptal edildi",
+                )
+                item.result = result
+                results.append(result)
+                self.file_done.emit(result)
                 continue
 
-            if action == ACTION_DELETE:
-                self.status_update.emit(f"🗑️  Siliniyor: {item.path.name}  ({idx}/{len(items)})")
-            else:
-                self.status_update.emit(f"📂  Taşınıyor: {item.path.name}  ({idx}/{len(items)})")
+            total = self._total_hint or len(self._items) or idx
+            action = self._settings.category_rules.get(
+                item.category.name, ACTION_SKIP
+            )
 
-            success, error_msg = self._process_file(item, action)
+            result = self._process_item(item, action, idx, total)
+            item.result = result
+            results.append(result)
+            self.file_done.emit(result)
 
-            if success:
-                if action == ACTION_DELETE:
-                    self._deleted += 1
-                else:
-                    self._moved += 1
-                item.moved = True
-            else:
-                self._failed += 1
-
-            self.file_moved.emit(item, success, error_msg)
-
-        self.all_done.emit(self._moved + self._deleted, self._failed)
-
-    def stop(self) -> None:
-        """Dışarıdan durdur (ESC veya pencere kapatma)."""
-        self._running = False
+        self.all_done.emit(results)
 
     # ------------------------------------------------------------------
-    # Tek dosya işleme (taşı veya sil)
+    # İptal / durdurma
     # ------------------------------------------------------------------
 
-    def _process_file(self, item: FileItem, action: str) -> tuple[bool, str]:
+    def cancel(self) -> None:
+        """Thread'i iptal et; bekleyen kuyruk bloklanmasını çözer."""
+        self._cancel_event.set()
+        self._queue.put(_END)
+
+    def stop(self, timeout_ms: int = 10000) -> None:
+        """Thread'i durdur ve bitmesini bekle."""
+        self.cancel()
+        self.wait(timeout_ms)
+
+    # ------------------------------------------------------------------
+    # Tek dosya işleme
+    # ------------------------------------------------------------------
+
+    def _process_item(
+        self,
+        item:   FileItem,
+        action: str,
+        idx:    int,
+        total:  int,
+    ) -> FileResult:
         """
-        action = "move"   → hedef klasöre taşı
-        action = "delete" → kalıcı olarak sil
+        Dosyayı belirtilen eyleme göre işle.
+        Sembolik bağlantılar reddedilir; kaynak dosya yoksa FAILED döner.
         """
-        try:
-            if action == ACTION_DELETE:
-                return self._delete_file(item)
+        # Sembolik bağlantı kontrolü (kırık symlink dahil)
+        if item.path.is_symlink():
+            return FileResult(
+                item=item,
+                status=FileStatus.FAILED,
+                error_msg="Sembolik bağlantılar işlenmez",
+            )
+
+        # Kaynak dosya varlığı kontrolü
+        if not item.path.exists():
+            return FileResult(
+                item=item,
+                status=FileStatus.FAILED,
+                error_msg="Kaynak dosya bulunamadı",
+            )
+
+        if action == ACTION_MOVE:
+            self.status_update.emit(
+                f"Taşınıyor: {item.path.name} ({idx}/{total})"
+            )
             return self._move_file(item)
-        except Exception as exc:  # noqa: BLE001
-            return False, f"Beklenmeyen hata: {exc}"
 
-    def _delete_file(self, item: FileItem) -> tuple[bool, str]:
-        """Dosyayı kalıcı olarak sil."""
+        if action == ACTION_TRASH:
+            self.status_update.emit(
+                f"Geri dönüşüme gönderiliyor: {item.path.name} ({idx}/{total})"
+            )
+            return self._trash_file(item)
+
+        if action == ACTION_DELETE:
+            self.status_update.emit(
+                f"Siliniyor: {item.path.name} ({idx}/{total})"
+            )
+            return self._delete_file(item)
+
+        # ACTION_SKIP veya bilinmeyen eylem -> dokunma
+        self.status_update.emit(f"Atlandı: {item.path.name}")
+        return FileResult(item=item, status=FileStatus.SKIPPED)
+
+    # ------------------------------------------------------------------
+    # Çöp Kutusu
+    # ------------------------------------------------------------------
+
+    def _trash_file(self, item: FileItem) -> FileResult:
+        """
+        Dosyayı geri dönüşüm kutusuna gönder.
+        send2trash yoksa hedef kök altındaki 'Corbeille' klasörüne taşı.
+        """
+        if item.path.is_symlink():
+            return FileResult(
+                item=item,
+                status=FileStatus.FAILED,
+                error_msg="Sembolik bağlantılar işlenmez",
+            )
+
         try:
-            item.path.unlink(missing_ok=True)
-            item.dest = None
-            return True, ""
-        except PermissionError as exc:
-            return False, f"İzin hatası: {exc}"
-        except OSError as exc:
-            return False, f"OS hatası: {exc}"
+            if HAS_SEND2TRASH and _send2trash is not None:
+                _send2trash(str(item.path))
+                return FileResult(item=item, status=FileStatus.TRASHED)
 
-    def _move_file(self, item: FileItem) -> tuple[bool, str]:
+            # Fallback: Corbeille klasörüne taşı
+            try:
+                target_root = self._settings.get_target_root()
+            except ValueError as exc:
+                return FileResult(
+                    item=item,
+                    status=FileStatus.FAILED,
+                    error_msg=str(exc),
+                )
+
+            corbeille = target_root / "Corbeille"
+            if not self._check_writable(corbeille):
+                return FileResult(
+                    item=item,
+                    status=FileStatus.FAILED,
+                    error_msg=f"Dizine yazma izni yok: {corbeille}",
+                )
+
+            corbeille.mkdir(parents=True, exist_ok=True)
+            dest = self._resolve_conflict(corbeille, item.path.name)
+
+            if item.path.resolve() == dest.resolve():
+                return FileResult(
+                    item=item,
+                    status=FileStatus.SKIPPED,
+                    dest=dest,
+                    error_msg="Kaynak ve hedef aynı konum",
+                )
+
+            shutil.move(str(item.path), str(dest))
+            if not dest.exists():
+                return FileResult(
+                    item=item,
+                    status=FileStatus.FAILED,
+                    error_msg="Dosya çöp klasöründe doğrulanamadı",
+                )
+
+            item.dest = dest
+            return FileResult(item=item, status=FileStatus.TRASHED, dest=dest)
+
+        except FileNotFoundError:
+            return FileResult(
+                item=item,
+                status=FileStatus.FAILED,
+                error_msg="Kaynak dosya bulunamadı",
+            )
+        except PermissionError as exc:
+            return FileResult(
+                item=item,
+                status=FileStatus.FAILED,
+                error_msg=f"İzin hatası: {exc}",
+            )
+        except OSError as exc:
+            return FileResult(
+                item=item,
+                status=FileStatus.FAILED,
+                error_msg=f"OS hatası: {exc}",
+            )
+        except Exception as exc:  # noqa: BLE001
+            return FileResult(
+                item=item,
+                status=FileStatus.FAILED,
+                error_msg=f"Beklenmeyen hata: {exc}",
+            )
+
+    # ------------------------------------------------------------------
+    # Kalıcı silme
+    # ------------------------------------------------------------------
+
+    def _delete_file(self, item: FileItem) -> FileResult:
+        """
+        Dosyayı kalıcı olarak sil.
+        permanent_delete_enabled False ise TRASHED olarak işle.
+        """
+        if not self._settings.permanent_delete_enabled:
+            # Güvenli mod: kalıcı silme yerine geri dönüşüme gönder
+            return self._trash_file(item)
+
+        if item.path.is_symlink():
+            return FileResult(
+                item=item,
+                status=FileStatus.FAILED,
+                error_msg="Sembolik bağlantılar işlenmez",
+            )
+
+        try:
+            item.path.unlink()
+            item.dest = None
+            return FileResult(item=item, status=FileStatus.DELETED_PERMANENTLY)
+        except FileNotFoundError:
+            return FileResult(
+                item=item,
+                status=FileStatus.FAILED,
+                error_msg="Kaynak dosya bulunamadı",
+            )
+        except PermissionError as exc:
+            return FileResult(
+                item=item,
+                status=FileStatus.FAILED,
+                error_msg=f"İzin hatası: {exc}",
+            )
+        except OSError as exc:
+            return FileResult(
+                item=item,
+                status=FileStatus.FAILED,
+                error_msg=f"OS hatası: {exc}",
+            )
+
+    # ------------------------------------------------------------------
+    # Dosya taşıma
+    # ------------------------------------------------------------------
+
+    def _move_file(self, item: FileItem) -> FileResult:
         """
         Dosyayı hedef kategorize klasörüne taşı.
-
-        Returns
-        -------
-        (success: bool, error_message: str)
+        Çakışma durumunda 'dosya (1).ext' şeklinde numara ekler.
         """
+        if item.path.is_symlink():
+            return FileResult(
+                item=item,
+                status=FileStatus.FAILED,
+                error_msg="Sembolik bağlantılar işlenmez",
+            )
+
         try:
-            # Ayarlardan hedef kökü al (custom veya varsayılan)
-            dest_dir = self._settings.get_target_root() / item.category.name
+            target_root = self._settings.get_target_root()
+        except ValueError as exc:
+            return FileResult(
+                item=item,
+                status=FileStatus.FAILED,
+                error_msg=str(exc),
+            )
+
+        try:
+            dest_dir = target_root / item.category.name
+
+            # Hedef dizin yazılabilirlik kontrolü
+            if not self._check_writable(dest_dir):
+                return FileResult(
+                    item=item,
+                    status=FileStatus.FAILED,
+                    error_msg=f"Dizine yazma izni yok: {dest_dir}",
+                )
+
             dest_dir.mkdir(parents=True, exist_ok=True)
 
+            # Kaynak dosya zaten aynı hedef dizindeyse üzerine yazma/yeniden adlandırma yapma
+            candidate = dest_dir / item.path.name
+            if candidate.exists() and item.path.resolve() == candidate.resolve():
+                return FileResult(
+                    item=item,
+                    status=FileStatus.SKIPPED,
+                    dest=candidate,
+                    error_msg="Kaynak ve hedef aynı konum",
+                )
+
             dest_path = self._resolve_conflict(dest_dir, item.path.name)
+            if item.path.resolve() == dest_path.resolve():
+                return FileResult(
+                    item=item,
+                    status=FileStatus.SKIPPED,
+                    dest=dest_path,
+                    error_msg="Kaynak ve hedef aynı konum",
+                )
+
             shutil.move(str(item.path), str(dest_path))
+            if not dest_path.exists():
+                return FileResult(
+                    item=item,
+                    status=FileStatus.FAILED,
+                    error_msg="Dosya taşındıktan sonra hedefte doğrulanamadı",
+                )
 
             item.dest = dest_path
-            return True, ""
+            return FileResult(item=item, status=FileStatus.MOVED, dest=dest_path)
 
+        except FileNotFoundError:
+            return FileResult(
+                item=item,
+                status=FileStatus.FAILED,
+                error_msg="Kaynak dosya bulunamadı",
+            )
         except PermissionError as exc:
-            return False, f"İzin hatası: {exc}"
-        except FileNotFoundError as exc:
-            return False, f"Dosya bulunamadı: {exc}"
+            return FileResult(
+                item=item,
+                status=FileStatus.FAILED,
+                error_msg=f"İzin hatası: {exc}",
+            )
         except OSError as exc:
-            return False, f"OS hatası: {exc}"
+            return FileResult(
+                item=item,
+                status=FileStatus.FAILED,
+                error_msg=f"OS hatası: {exc}",
+            )
         except Exception as exc:  # noqa: BLE001
-            return False, f"Beklenmeyen hata: {exc}"
+            return FileResult(
+                item=item,
+                status=FileStatus.FAILED,
+                error_msg=f"Beklenmeyen hata: {exc}",
+            )
 
     # ------------------------------------------------------------------
-    # Çakışma çözümü
+    # Yardımcı metotlar
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _check_writable(directory: pathlib.Path) -> bool:
+        """
+        Dizin yazılabilir mi kontrol et.
+        Dizin henüz mevcut değilse var olan en yakın üst dizini kontrol eder.
+        """
+        check = pathlib.Path(directory).resolve()
+        while not check.exists():
+            parent = check.parent
+            if parent == check:
+                return False
+            check = parent
+        if not check.is_dir():
+            return False
+        return os.access(check, os.W_OK)
 
     @staticmethod
     def _resolve_conflict(dest_dir: pathlib.Path, filename: str) -> pathlib.Path:
         """
         Hedef dizinde aynı isimde dosya varsa numara ekle.
 
-        Örnek: rapor.pdf → rapor (2).pdf → rapor (3).pdf
+        Örnek: rapor.pdf -> rapor (1).pdf -> rapor (2).pdf
         """
         dest = dest_dir / filename
-
         if not dest.exists():
             return dest
 
-        stem   = pathlib.Path(filename).stem
-        suffix = pathlib.Path(filename).suffix
-        counter = 2
+        stem    = pathlib.Path(filename).stem
+        suffix  = pathlib.Path(filename).suffix
+        counter = 1
 
         while True:
             new_name = f"{stem} ({counter}){suffix}"
@@ -190,3 +517,10 @@ class FileMover(QThread):
             if not dest.exists():
                 return dest
             counter += 1
+
+
+# ---------------------------------------------------------------------------
+# Geriye dönük uyumluluk takma adı
+# ---------------------------------------------------------------------------
+
+FileMover = FileWorkerThread

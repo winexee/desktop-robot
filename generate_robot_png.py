@@ -10,7 +10,6 @@ Kendi görselinizi kullanmak isterseniz:
 
 import sys
 import pathlib
-import math
 
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import Qt, QRectF, QPointF
@@ -153,15 +152,53 @@ def main() -> None:
     px = render_robot(SIZE)
 
     if px.save(str(out_path), "PNG"):
-        print(f"✅  Görsel kaydedildi: {out_path}")
-        print(f"   Boyut: {SIZE}×{SIZE} px")
+        print(f"[OK] Gorsel kaydedildi: {out_path}")
+        print(f"     Boyut: {SIZE}x{SIZE} px")
         print()
-        print("İpucu: Kendi görselinizi kullanmak için")
+        print("Ipucu: Kendi gorselinizi kullanmak icin")
         print(f"       {out_path} yoluna PNG koyun.")
     else:
-        print("❌  Görsel kaydedilemedi!")
+        print("[HATA] Gorsel kaydedilemedi!", file=sys.stderr)
         sys.exit(1)
 
 
+def make_ico() -> None:
+    """
+    assets/robot_supurge.png dosyasindan ICO olusturur.
+    PNG mevcut degilse once render_robot(SIZE) ile PNG uretir.
+    Pillow (PIL) gerektirir.
+    """
+    assets_dir = pathlib.Path(__file__).parent / "assets"
+    assets_dir.mkdir(exist_ok=True)
+    png_path = assets_dir / "robot_supurge.png"
+    ico_path = assets_dir / "robot_supurge.ico"
+
+    if not png_path.exists():
+        _app = QApplication.instance() or QApplication(sys.argv)
+        px = render_robot(SIZE)
+        if not px.save(str(png_path), "PNG"):
+            print(f"[HATA] {png_path} olusturulamadi.", file=sys.stderr)
+            sys.exit(1)
+        print(f"[OK] Gorsel olusturuldu: {png_path}")
+
+    try:
+        from PIL import Image
+    except ImportError:
+        print(
+            "Uyari: Pillow yuklu degil. ICO olusturulamadi. "
+            "'pip install Pillow' komutu ile yukleyin."
+        )
+        return
+
+    img = Image.open(png_path).convert("RGBA")
+    sizes = [16, 32, 48, 64, 128, 256]
+    img.save(str(ico_path), format="ICO", sizes=[(s, s) for s in sizes])
+    print(f"ICO olusturuldu: {ico_path}")
+
+
 if __name__ == "__main__":
-    main()
+    if "--make-ico" in sys.argv:
+        # QApplication gerekmeden sadece ICO uret
+        make_ico()
+    else:
+        main()

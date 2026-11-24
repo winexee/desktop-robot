@@ -1,15 +1,15 @@
 """
-Masaüstü Robot Süpürge — Rapor Ekranı
-=======================================
-Tüm dosyalar taşındıktan sonra açılan animasyonlu özet penceresi.
+Masaüstü Robot Süpürge - Temizlik Raporu
+========================================
+Tüm dosyalar işlendikten sonra gösterilen özet penceresi.
 
 Özellikler
 ----------
-- Kategori başına renkli kart (emoji + ad + dosya sayısı + progress bar)
-- Üst özet: toplam taşınan, hatalı, geçen süre
-- Alt butonlar: "Klasörü Aç" ve "Kapat"
-- Fade-in + yukarı kayma animasyonu
-- Cross-platform klasör açma (Windows: explorer, Linux: xdg-open, macOS: open)
+- Özet kartlar (Taşınan, Çöp Kutusu, Kalıcı Silinen, Atlanan, Başarısız)
+- Geçen süre ve tarama özeti bilgi satırı
+- Üç sekmeli rapor görünümü (Başarılı / Kategoriler / Atlanan ve Hatalar)
+- Klasörü Aç ve Kapat butonları (cross-platform)
+- Tamamen opak koyu tema arayüzü
 """
 
 from __future__ import annotations
@@ -17,176 +17,435 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-import time
+from pathlib import Path
 from typing import Optional
 
-from PyQt6.QtCore import (
-    Qt, QTimer, QPropertyAnimation, QEasingCurve,
-    QRect, QSize, pyqtSignal,
-)
-from PyQt6.QtGui import (
-    QColor, QPainter, QBrush, QPen, QFont,
-    QFontMetrics, QLinearGradient, QPixmap,
-)
+from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QCloseEvent, QFont, QIcon, QShowEvent
 from PyQt6.QtWidgets import (
-    QDialog, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QPushButton, QScrollArea, QFrame,
-    QGraphicsDropShadowEffect, QGraphicsOpacityEffect,
-    QSizePolicy, QApplication,
+    QDialog,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QMessageBox,
+    QProgressBar,
+    QPushButton,
+    QScrollArea,
+    QSizePolicy,
+    QTabWidget,
+    QVBoxLayout,
+    QWidget,
 )
 
 import config
-from file_scanner import ScanResult, FileItem
+from file_mover import FileResult, FileStatus
+from file_scanner import ScanResult
 
 
 # ---------------------------------------------------------------------------
-# Stil sabitleri
+# Stil sabitleri (tamamen opak hex renkler)
 # ---------------------------------------------------------------------------
 
-BG_COLOR        = QColor(18,  20,  30)   # koyu lacivert arkaplan
-CARD_BG         = QColor(28,  32,  48)   # kart arkaplanı
-CARD_BORDER     = QColor(55,  60,  85)   # kart kenarlığı
-TEXT_PRIMARY    = QColor(230, 232, 245)   # başlık metni
-TEXT_SECONDARY  = QColor(140, 145, 170)   # açıklama metni
-ACCENT_GREEN    = QColor(80,  220, 140)   # başarı rengi
-ACCENT_RED      = QColor(255, 90,  90)    # hata rengi
-ACCENT_BLUE     = QColor(80,  160, 255)   # buton rengi
+BG_COLOR       = "#1e1f22"
+CARD_BG        = "#2b2d31"
+CARD_BORDER    = "#3f4147"
+ROW_ALT_BG     = "#313338"
+SECTION_BG     = "#232428"
 
-DIALOG_W = 540
-DIALOG_H = 680
+COLOR_MOVED    = "#57f287"   # yesil
+COLOR_TRASHED  = "#5865f2"   # mor/mavi
+COLOR_DELETED  = "#ff9d4d"   # turuncu
+COLOR_SKIPPED  = "#b5bac1"   # gri
+COLOR_FAILED   = "#fe4c43"   # kirmizi
+
+TEXT_PRIMARY   = "#f2f3f5"
+TEXT_BODY      = "#dcddde"
+TEXT_SECONDARY = "#b5bac1"
+TEXT_DIM       = "#949ba4"
+
+DIALOG_W = 640
+DIALOG_H = 720
+
+SUCCESS_STATUSES = frozenset({
+    FileStatus.MOVED,
+    FileStatus.TRASHED,
+    FileStatus.DELETED_PERMANENTLY,
+})
+
+PROBLEM_STATUSES = frozenset({
+    FileStatus.FAILED,
+    FileStatus.CANCELLED,
+    FileStatus.SKIPPED,
+})
 
 
 # ---------------------------------------------------------------------------
-# Yardımcı: cross-platform klasör açma
+# Yardımcılar
 # ---------------------------------------------------------------------------
 
-def open_folder(path: str) -> None:
-    """İşletim sistemine göre dosya yöneticisinde klasörü aç."""
-    system = sys.platform
-
-    try:
-        if system == "win32":
-            os.startfile(path)                          # Windows Explorer
-        elif system == "darwin":
-            subprocess.Popen(["open", path])            # macOS Finder
-        else:
-            subprocess.Popen(["xdg-open", path])        # Linux (Nautilus, Dolphin…)
-    except Exception:
-        pass   # Sessizce başarısız; kritik değil
+def _get_asset_icon(filename: str) -> QIcon:
+    """Varlık dosyasının mutlak yolundan QIcon oluştur."""
+    if hasattr(config, "get_asset_path"):
+        return QIcon(str(config.get_asset_path(filename)))
+    return QIcon(str(Path(__file__).resolve().parent / "assets" / filename))
 
 
-# ---------------------------------------------------------------------------
-# Kategori kartı widget'ı
-# ---------------------------------------------------------------------------
-
-class CategoryCard(QFrame):
+def open_folder(path: str | Path) -> tuple[bool, str]:
     """
-    Tek bir kategoriyi gösteren kart.
-    Sol: emoji + ad  |  Orta: progress bar  |  Sağ: sayı
+    İşletim sistemine göre dosya yöneticisinde klasörü aç.
+    config.open_folder varsa onu kullanır.
+    """
+    if hasattr(config, "open_folder"):
+        return config.open_folder(path)
+
+    target = str(path)
+    try:
+        if sys.platform == "win32":
+            os.startfile(target)
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", target])
+        else:
+            subprocess.Popen(["xdg-open", target])
+        return True, ""
+    except Exception as exc:
+        return False, str(exc)
+
+
+def _status_display(result: FileResult) -> tuple[str, str]:
+    """FileResult için (gösterim metni, hex renk) döndürür."""
+    s = result.status
+    if s == FileStatus.MOVED:
+        return "Taşındı", COLOR_MOVED
+    if s == FileStatus.TRASHED:
+        return "Çöp Kutusu", COLOR_TRASHED
+    if s == FileStatus.DELETED_PERMANENTLY:
+        return "Kalıcı Silindi", COLOR_DELETED
+    if s == FileStatus.SKIPPED:
+        return "Atlandı", COLOR_SKIPPED
+    if s == FileStatus.FAILED:
+        return "Başarısız", COLOR_FAILED
+    if s == FileStatus.CANCELLED:
+        return "İptal Edildi", COLOR_FAILED
+    return "Bilinmiyor", TEXT_DIM
+
+
+def _create_scroll_area() -> tuple[QScrollArea, QWidget, QVBoxLayout]:
+    """Opak koyu temalı standart bir QScrollArea ve içerik yerleşimi oluşturur."""
+    scroll = QScrollArea()
+    scroll.setWidgetResizable(True)
+    scroll.setFrameShape(QFrame.Shape.NoFrame)
+    scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    scroll.setStyleSheet(f"""
+        QScrollArea {{
+            background-color: {CARD_BG};
+            border: none;
+        }}
+        QScrollBar:vertical {{
+            background-color: {BG_COLOR};
+            width: 8px;
+            border-radius: 4px;
+            margin: 2px;
+        }}
+        QScrollBar::handle:vertical {{
+            background-color: #4e5058;
+            border-radius: 4px;
+            min-height: 24px;
+        }}
+        QScrollBar::handle:vertical:hover {{
+            background-color: #6d6f78;
+        }}
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+            height: 0px;
+            background-color: {BG_COLOR};
+        }}
+        QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
+            background-color: {BG_COLOR};
+        }}
+    """)
+
+    container = QWidget()
+    container.setObjectName("scrollContainer")
+    container.setStyleSheet(f"QWidget#scrollContainer {{ background-color: {CARD_BG}; }}")
+
+    vbox = QVBoxLayout(container)
+    vbox.setContentsMargins(0, 0, 0, 0)
+    vbox.setSpacing(0)
+
+    scroll.setWidget(container)
+    if scroll.viewport():
+        scroll.viewport().setStyleSheet(f"background-color: {CARD_BG};")
+
+    return scroll, container, vbox
+
+
+# ---------------------------------------------------------------------------
+# Özet kart widget'ı
+# ---------------------------------------------------------------------------
+
+class SummaryCard(QFrame):
+    """
+    Tek bir özet metriği gösteren kart.
+    Üst kısımda büyük kalın sayı, alt kısımda küçük etiket.
     """
 
     def __init__(
         self,
-        emoji:   str,
-        name:    str,
-        count:   int,
-        total:   int,
-        color:   str,
-        parent:  Optional[QWidget] = None,
+        label: str,
+        count: int,
+        color: str,
+        parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
-        self._color  = QColor(color)
-        self._count  = count
-        self._total  = total
-        self._ratio  = count / total if total > 0 else 0.0
-        self._bar_w  = 0.0          # animasyonla dolacak
-
-        self.setFixedHeight(52)
+        self.setObjectName("summaryCard")
         self.setStyleSheet(f"""
-            QFrame {{
-                background: rgba(28, 32, 48, 220);
-                border: 1px solid rgba(55, 60, 85, 180);
-                border-left: 3px solid {color};
+            QFrame#summaryCard {{
+                background-color: {CARD_BG};
+                border: 1px solid {CARD_BORDER};
+                border-radius: 8px;
+            }}
+        """)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setFixedHeight(78)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 10, 8, 10)
+        layout.setSpacing(2)
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        lbl_count = QLabel(str(count))
+        lbl_count.setFont(QFont("Segoe UI", 20, QFont.Weight.Bold))
+        lbl_count.setStyleSheet(
+            f"color: {color}; background-color: {CARD_BG}; border: none;"
+        )
+        lbl_count.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        lbl_name = QLabel(label)
+        lbl_name.setFont(QFont("Segoe UI", 9))
+        lbl_name.setStyleSheet(
+            f"color: {TEXT_SECONDARY}; background-color: {CARD_BG}; border: none;"
+        )
+        lbl_name.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        layout.addWidget(lbl_count)
+        layout.addWidget(lbl_name)
+
+
+# ---------------------------------------------------------------------------
+# Kategori ilerleme kartı widget'ı
+# ---------------------------------------------------------------------------
+
+class CategoryProgressCard(QFrame):
+    """
+    Kategoriler sekmesi için tek kategori kartı.
+    Renkli nokta + kategori adı + 'başarılı / toplam' + QProgressBar.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        color: str,
+        success_count: int,
+        total_count: int,
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setObjectName("categoryCard")
+        self.setStyleSheet(f"""
+            QFrame#categoryCard {{
+                background-color: {ROW_ALT_BG};
+                border: 1px solid {CARD_BORDER};
                 border-radius: 8px;
             }}
         """)
 
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(14, 0, 14, 0)
-        layout.setSpacing(10)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(14, 10, 14, 10)
+        outer.setSpacing(6)
 
-        # Emoji + ad
-        lbl_emoji = QLabel(f"{emoji}")
-        lbl_emoji.setFont(QFont("Segoe UI Emoji", 16))
-        lbl_emoji.setFixedWidth(28)
+        top_row = QHBoxLayout()
+        top_row.setContentsMargins(0, 0, 0, 0)
+        top_row.setSpacing(8)
 
-        lbl_name = QLabel(name)
-        lbl_name.setFont(QFont("Segoe UI", 10, QFont.Weight.Medium))
-        lbl_name.setStyleSheet(f"color: {QColor(TEXT_PRIMARY).name()}; border: none;")
-        lbl_name.setFixedWidth(90)
-
-        # Boş alan — progress bar paintEvent'te çizilir
-        self._bar_placeholder = QWidget()
-        self._bar_placeholder.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
+        # QSS ile çizilmiş 10x10 renkli durum noktası
+        dot = QLabel()
+        dot.setFixedSize(10, 10)
+        dot.setStyleSheet(
+            f"background-color: {color}; border-radius: 5px; border: none;"
         )
 
-        # Sayı
-        lbl_count = QLabel(f"{count}")
-        lbl_count.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
-        lbl_count.setStyleSheet(f"color: {color}; border: none;")
-        lbl_count.setFixedWidth(36)
-        lbl_count.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        lbl_name = QLabel(name)
+        lbl_name.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+        lbl_name.setStyleSheet(
+            f"color: {TEXT_PRIMARY}; background-color: {ROW_ALT_BG}; border: none;"
+        )
 
-        layout.addWidget(lbl_emoji)
-        layout.addWidget(lbl_name)
-        layout.addWidget(self._bar_placeholder, 1)
-        layout.addWidget(lbl_count)
+        lbl_ratio = QLabel(f"{success_count} / {total_count}")
+        lbl_ratio.setFont(QFont("Segoe UI", 9, QFont.Weight.Medium))
+        lbl_ratio.setStyleSheet(
+            f"color: {TEXT_SECONDARY}; background-color: {ROW_ALT_BG}; border: none;"
+        )
+        lbl_ratio.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
-        # Progress bar animasyonu (0 → ratio)
-        self._anim_step  = 0.0
-        self._anim_timer = QTimer(self)
-        self._anim_timer.timeout.connect(self._animate_bar)
+        top_row.addWidget(dot)
+        top_row.addWidget(lbl_name, 1)
+        top_row.addWidget(lbl_ratio)
 
-    def start_animation(self, delay_ms: int = 0) -> None:
-        """delay_ms ms sonra dolum animasyonunu başlat."""
-        QTimer.singleShot(delay_ms, lambda: self._anim_timer.start(16))
+        # İlerleme çubuğu: oran her zaman kendi kategorisinin toplamına göre
+        bar = QProgressBar()
+        bar.setFixedHeight(10)
+        bar.setTextVisible(False)
+        bar.setRange(0, max(1, total_count))
+        bar.setValue(min(success_count, max(1, total_count)) if total_count > 0 else 0)
+        bar.setStyleSheet(f"""
+            QProgressBar {{
+                background-color: {BG_COLOR};
+                border: 1px solid {CARD_BORDER};
+                border-radius: 5px;
+            }}
+            QProgressBar::chunk {{
+                background-color: {color};
+                border-radius: 4px;
+            }}
+        """)
 
-    def _animate_bar(self) -> None:
-        self._anim_step += 0.04
-        self._bar_w = min(self._ratio, self._anim_step) * self._get_bar_max()
-        self.update()
-        if self._anim_step >= self._ratio:
-            self._anim_timer.stop()
+        outer.addLayout(top_row)
+        outer.addWidget(bar)
 
-    def _get_bar_max(self) -> float:
-        return float(self._bar_placeholder.width()) if self._bar_placeholder.width() > 0 else 160.0
 
-    def paintEvent(self, _event) -> None:  # type: ignore[override]
-        super().paintEvent(_event)
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+# ---------------------------------------------------------------------------
+# Dosya satırı ve bilgi satırı widget'ları
+# ---------------------------------------------------------------------------
 
-        # Progress bar konumu (placeholder'ın sınırları)
-        bx = self._bar_placeholder.x()
-        by = self.height() // 2 - 4
-        bh = 8
-        bw_max = self._bar_placeholder.width()
+class FileRow(QWidget):
+    """
+    Tek bir FileResult sonucunu gösteren satır.
+    Sol: dosya adı ve varsa hedef yol/hata mesajı | Sağ: durum etiketi
+    """
 
-        # Arka plan izi
-        painter.setBrush(QBrush(QColor(45, 50, 70)))
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.drawRoundedRect(bx, by, bw_max, bh, 4, 4)
+    def __init__(
+        self,
+        result: FileResult,
+        alt_row: bool = False,
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
 
-        # Dolum kısmı
-        if self._bar_w > 0:
-            grad = QLinearGradient(bx, 0, bx + bw_max, 0)
-            grad.setColorAt(0.0, self._color.lighter(130))
-            grad.setColorAt(1.0, self._color)
-            painter.setBrush(QBrush(grad))
-            painter.drawRoundedRect(bx, by, int(self._bar_w), bh, 4, 4)
+        bg = ROW_ALT_BG if alt_row else CARD_BG
+        self.setObjectName("fileRow")
+        self.setStyleSheet(f"QWidget#fileRow {{ background-color: {bg}; }}")
+        self.setMinimumHeight(44)
 
-        painter.end()
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(12, 8, 12, 8)
+        layout.setSpacing(10)
+
+        left_col = QVBoxLayout()
+        left_col.setContentsMargins(0, 0, 0, 0)
+        left_col.setSpacing(2)
+
+        filename = result.item.path.name if result.item and result.item.path else "?"
+        lbl_name = QLabel(filename)
+        lbl_name.setFont(QFont("Segoe UI", 9, QFont.Weight.Medium))
+        lbl_name.setStyleSheet(f"color: {TEXT_PRIMARY}; background-color: {bg};")
+        lbl_name.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        lbl_name.setWordWrap(False)
+
+        source_tip = str(result.item.path) if result.item and result.item.path else ""
+        if result.dest:
+            lbl_name.setToolTip(f"{source_tip}\n-> {result.dest}")
+        else:
+            lbl_name.setToolTip(source_tip)
+
+        left_col.addWidget(lbl_name)
+
+        # Alt satır: hata mesajı veya hedef yolu
+        sub_text = ""
+        sub_color = TEXT_DIM
+        if result.error_msg:
+            sub_text = result.error_msg
+            if result.status in (FileStatus.FAILED, FileStatus.CANCELLED):
+                sub_color = "#f38682"
+        elif result.dest is not None:
+            sub_text = f"Hedef: {result.dest}"
+
+        if sub_text:
+            lbl_sub = QLabel(sub_text)
+            lbl_sub.setFont(QFont("Segoe UI", 8))
+            lbl_sub.setStyleSheet(f"color: {sub_color}; background-color: {bg};")
+            lbl_sub.setWordWrap(True)
+            lbl_sub.setToolTip(sub_text)
+            left_col.addWidget(lbl_sub)
+
+        status_text, status_color = _status_display(result)
+        lbl_status = QLabel(status_text)
+        lbl_status.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
+        lbl_status.setStyleSheet(f"color: {status_color}; background-color: {bg};")
+        lbl_status.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        lbl_status.setMinimumWidth(90)
+
+        layout.addLayout(left_col, 1)
+        layout.addWidget(lbl_status, 0, Qt.AlignmentFlag.AlignTop)
+
+
+class _SimpleInfoRow(QWidget):
+    """Atlanan klasör veya gizli/sistem dosyası satırı."""
+
+    def __init__(
+        self,
+        title: str,
+        badge: str,
+        tooltip: str = "",
+        alt_row: bool = False,
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+
+        bg = ROW_ALT_BG if alt_row else CARD_BG
+        self.setObjectName("infoRow")
+        self.setStyleSheet(f"QWidget#infoRow {{ background-color: {bg}; }}")
+        self.setMinimumHeight(36)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(12, 6, 12, 6)
+        layout.setSpacing(8)
+
+        lbl_title = QLabel(title)
+        lbl_title.setFont(QFont("Segoe UI", 9))
+        lbl_title.setStyleSheet(f"color: {TEXT_BODY}; background-color: {bg};")
+        lbl_title.setWordWrap(False)
+        if tooltip:
+            lbl_title.setToolTip(tooltip)
+
+        lbl_badge = QLabel(badge)
+        lbl_badge.setFont(QFont("Segoe UI", 8))
+        lbl_badge.setStyleSheet(f"color: {TEXT_DIM}; background-color: {bg};")
+        lbl_badge.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+        layout.addWidget(lbl_title, 1)
+        layout.addWidget(lbl_badge)
+
+
+class _SectionHeader(QWidget):
+    """Liste içi bölüm başlığı."""
+
+    def __init__(self, text: str, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setObjectName("sectionHeader")
+        self.setStyleSheet(
+            f"QWidget#sectionHeader {{ background-color: {SECTION_BG}; "
+            f"border-top: 1px solid {CARD_BORDER}; border-bottom: 1px solid {CARD_BORDER}; }}"
+        )
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(12, 6, 12, 6)
+
+        lbl = QLabel(text)
+        lbl.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
+        lbl.setStyleSheet(f"color: {TEXT_SECONDARY}; background-color: {SECTION_BG};")
+        layout.addWidget(lbl)
 
 
 # ---------------------------------------------------------------------------
@@ -199,329 +458,457 @@ class ReportDialog(QDialog):
 
     Kullanım
     --------
-        dialog = ReportDialog(scan_result, elapsed_seconds)
+        dialog = ReportDialog(results, elapsed_seconds, target_root, scan_result=scan)
         dialog.exec()
     """
 
-    closed = pyqtSignal()   # Kullanıcı kapattı sinyali
+    closed = pyqtSignal()
 
     def __init__(
         self,
-        result:  ScanResult,
-        elapsed: float = 0.0,
-        parent:  Optional[QWidget] = None,
+        results: list[FileResult],
+        elapsed: float,
+        target_root: Path,
+        scan_result: Optional[ScanResult] = None,
+        parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
-        self._result  = result
+        self._results = list(results)
         self._elapsed = elapsed
-        self._cards:  list[CategoryCard] = []
+        self._target_root = (
+            Path(target_root)
+            if target_root is not None
+            else config.get_organized_root()
+        )
+        self._scan_result = scan_result
+        self._closed_emitted = False
 
         self._setup_window()
         self._build_ui()
-        self._apply_entrance_animation()
 
     # ------------------------------------------------------------------
-    # Pencere ayarları
+    # Pencere ayarları ve kapatma sinyali koruması
     # ------------------------------------------------------------------
 
     def _setup_window(self) -> None:
-        self.setWindowFlags(
-            Qt.WindowType.FramelessWindowHint
-            | Qt.WindowType.WindowStaysOnTopHint
-            | Qt.WindowType.Dialog
-        )
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setWindowTitle("Temizlik Raporu")
+        self.setMinimumSize(600, 660)
+        self.resize(DIALOG_W, DIALOG_H)
+        self.setWindowIcon(_get_asset_icon("robot_supurge.png"))
 
-        self.setFixedSize(DIALOG_W, DIALOG_H)
+        self.setStyleSheet(f"""
+            QDialog {{
+                background-color: {BG_COLOR};
+                color: {TEXT_BODY};
+            }}
+            QMessageBox {{
+                background-color: {BG_COLOR};
+                color: {TEXT_BODY};
+            }}
+        """)
 
-        # Ekran ortasına yerleştir
-        screen = QApplication.primaryScreen().geometry()
-        self.move(
-            (screen.width()  - DIALOG_W) // 2,
-            (screen.height() - DIALOG_H) // 2,
-        )
+    def _emit_closed_once(self) -> None:
+        if not self._closed_emitted:
+            self._closed_emitted = True
+            self.closed.emit()
+
+    def showEvent(self, event: QShowEvent) -> None:
+        self._closed_emitted = False
+        super().showEvent(event)
+
+    def accept(self) -> None:
+        self._emit_closed_once()
+        super().accept()
+
+    def reject(self) -> None:
+        self._emit_closed_once()
+        super().reject()
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        self._emit_closed_once()
+        super().closeEvent(event)
 
     # ------------------------------------------------------------------
     # UI inşası
     # ------------------------------------------------------------------
 
     def _build_ui(self) -> None:
-        # Dış konteyner (gradient arka plan + gölge)
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(20, 20, 20, 20)
+        root_layout = QVBoxLayout(self)
+        root_layout.setContentsMargins(16, 16, 16, 16)
+        root_layout.setSpacing(10)
 
-        self._card_widget = QFrame()
-        self._card_widget.setObjectName("mainCard")
-        self._card_widget.setStyleSheet("""
-            QFrame#mainCard {
-                background: qlineargradient(
-                    x1:0, y1:0, x2:0, y2:1,
-                    stop:0 rgba(22, 25, 40, 245),
-                    stop:1 rgba(14, 16, 28, 250)
-                );
-                border: 1px solid rgba(80, 90, 130, 160);
-                border-radius: 20px;
-            }
-        """)
+        lbl_title = QLabel("Temizlik Raporu")
+        lbl_title.setFont(QFont("Segoe UI", 15, QFont.Weight.Bold))
+        lbl_title.setStyleSheet(f"color: {TEXT_PRIMARY}; background-color: {BG_COLOR};")
+        root_layout.addWidget(lbl_title)
 
-        shadow = QGraphicsDropShadowEffect()
-        shadow.setBlurRadius(40)
-        shadow.setOffset(0, 8)
-        shadow.setColor(QColor(0, 0, 0, 160))
-        self._card_widget.setGraphicsEffect(shadow)
+        # Üst özet kartları
+        root_layout.addLayout(self._build_summary_cards())
 
-        inner = QVBoxLayout(self._card_widget)
-        inner.setContentsMargins(28, 24, 28, 24)
-        inner.setSpacing(14)
+        # Süre ve tarama özeti bilgi satırı
+        root_layout.addLayout(self._build_info_section())
 
-        inner.addLayout(self._build_header())
-        inner.addLayout(self._build_summary())
-        inner.addWidget(self._build_separator())
-        inner.addWidget(self._build_category_scroll(), 1)
-        inner.addWidget(self._build_separator())
-        inner.addLayout(self._build_buttons())
+        # 3 sekmeli detay görünümü
+        root_layout.addWidget(self._build_tab_widget(), 1)
 
-        outer.addWidget(self._card_widget)
+        # Alt butonlar
+        root_layout.addLayout(self._build_buttons())
 
-    # --- Başlık ---
-
-    def _build_header(self) -> QHBoxLayout:
+    def _build_summary_cards(self) -> QHBoxLayout:
         layout = QHBoxLayout()
-
-        # Robot emoji
-        lbl_icon = QLabel("🤖")
-        lbl_icon.setFont(QFont("Segoe UI Emoji", 28))
-        lbl_icon.setFixedWidth(50)
-
-        # Başlık metni
-        v = QVBoxLayout()
-        v.setSpacing(2)
-
-        lbl_title = QLabel("Temizlik Tamamlandı!")
-        lbl_title.setFont(QFont("Segoe UI", 17, QFont.Weight.Bold))
-        lbl_title.setStyleSheet(f"color: {ACCENT_GREEN.name()};")
-
-        lbl_sub = QLabel("Masaüstün artık pırıl pırıl ✨")
-        lbl_sub.setFont(QFont("Segoe UI", 10))
-        lbl_sub.setStyleSheet(f"color: {TEXT_SECONDARY.name()};")
-
-        v.addWidget(lbl_title)
-        v.addWidget(lbl_sub)
-
-        # Kapat (×) butonu
-        btn_close = QPushButton("×")
-        btn_close.setFixedSize(32, 32)
-        btn_close.setFont(QFont("Segoe UI", 16))
-        btn_close.setStyleSheet("""
-            QPushButton {
-                color: rgba(180,180,200,180);
-                background: transparent;
-                border: none;
-                border-radius: 16px;
-            }
-            QPushButton:hover {
-                background: rgba(255,80,80,80);
-                color: white;
-            }
-        """)
-        btn_close.clicked.connect(self._on_close)
-
-        layout.addWidget(lbl_icon)
-        layout.addLayout(v, 1)
-        layout.addWidget(btn_close, 0, Qt.AlignmentFlag.AlignTop)
-        return layout
-
-    # --- Özet istatistikler ---
-
-    def _build_summary(self) -> QHBoxLayout:
-        result  = self._result
-        moved   = sum(1 for i in result.items if i.moved)
-        failed  = sum(1 for i in result.items if not i.moved)
-        elapsed = self._elapsed
-
-        def _stat(value: str, label: str, color: QColor) -> QVBoxLayout:
-            v = QVBoxLayout()
-            v.setSpacing(1)
-            v.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-            lbl_v = QLabel(value)
-            lbl_v.setFont(QFont("Segoe UI", 22, QFont.Weight.Bold))
-            lbl_v.setStyleSheet(f"color: {color.name()};")
-            lbl_v.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-            lbl_l = QLabel(label)
-            lbl_l.setFont(QFont("Segoe UI", 9))
-            lbl_l.setStyleSheet(f"color: {TEXT_SECONDARY.name()};")
-            lbl_l.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-            v.addWidget(lbl_v)
-            v.addWidget(lbl_l)
-            return v
-
-        def _divider() -> QFrame:
-            line = QFrame()
-            line.setFrameShape(QFrame.Shape.VLine)
-            line.setFixedWidth(1)
-            line.setStyleSheet("background: rgba(80,90,120,100);")
-            return line
-
-        layout = QHBoxLayout()
-        layout.setSpacing(0)
-        layout.addLayout(_stat(str(moved), "Taşındı", ACCENT_GREEN))
-        layout.addWidget(_divider())
-        layout.addLayout(_stat(str(failed), "Hatalı",  ACCENT_RED if failed else TEXT_SECONDARY))
-        layout.addWidget(_divider())
-        layout.addLayout(_stat(f"{elapsed:.1f}s", "Süre", ACCENT_BLUE))
-
-        return layout
-
-    # --- Ayraç ---
-
-    @staticmethod
-    def _build_separator() -> QFrame:
-        line = QFrame()
-        line.setFrameShape(QFrame.Shape.HLine)
-        line.setFixedHeight(1)
-        line.setStyleSheet("background: rgba(70, 80, 115, 120);")
-        return line
-
-    # --- Kategori kartları (kaydırılabilir) ---
-
-    def _build_category_scroll(self) -> QScrollArea:
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setStyleSheet("""
-            QScrollArea { background: transparent; }
-            QScrollBar:vertical {
-                background: rgba(30,34,52,180);
-                width: 6px; border-radius: 3px;
-            }
-            QScrollBar::handle:vertical {
-                background: rgba(80,100,160,180);
-                border-radius: 3px; min-height: 20px;
-            }
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
-        """)
-
-        container = QWidget()
-        container.setStyleSheet("background: transparent;")
-        layout = QVBoxLayout(container)
-        layout.setContentsMargins(0, 4, 0, 4)
         layout.setSpacing(8)
 
-        by_cat    = self._result.by_category
-        total_moved = sum(1 for i in self._result.items if i.moved)
+        moved_count   = sum(1 for r in self._results if r.status == FileStatus.MOVED)
+        trashed_count = sum(1 for r in self._results if r.status == FileStatus.TRASHED)
+        deleted_count = sum(1 for r in self._results if r.status == FileStatus.DELETED_PERMANENTLY)
+        skipped_count = sum(1 for r in self._results if r.status == FileStatus.SKIPPED)
+        failed_count  = sum(
+            1 for r in self._results
+            if r.status in (FileStatus.FAILED, FileStatus.CANCELLED)
+        )
 
-        # Yalnızca dosya olan kategorileri göster, sayıya göre sırala
-        for cat in config.CATEGORIES:
-            items = by_cat.get(cat.name, [])
-            if not items:
-                continue
+        cards: list[tuple[str, int, str]] = [
+            ("Taşınan",      moved_count,   COLOR_MOVED),
+            ("Çöp Kutusu",   trashed_count, COLOR_TRASHED),
+        ]
+        if deleted_count > 0:
+            cards.append(("Kalıcı Silinen", deleted_count, COLOR_DELETED))
+        cards.extend([
+            ("Atlanan",      skipped_count, COLOR_SKIPPED),
+            ("Başarısız",    failed_count,  COLOR_FAILED),
+        ])
 
-            card = CategoryCard(
-                emoji=cat.emoji,
-                name=cat.name,
-                count=len(items),
-                total=total_moved or 1,
-                color=cat.color,
+        for label, count, color in cards:
+            layout.addWidget(SummaryCard(label, count, color))
+
+        return layout
+
+    def _build_info_section(self) -> QVBoxLayout:
+        vbox = QVBoxLayout()
+        vbox.setContentsMargins(0, 2, 0, 2)
+        vbox.setSpacing(2)
+
+        skipped_dirs_count = (
+            len(self._scan_result.skipped_dirs) if self._scan_result else 0
+        )
+        skipped_names_count = (
+            len(self._scan_result.skipped_names) if self._scan_result else 0
+        )
+
+        info_text = (
+            f"Geçen süre: {self._elapsed:.1f} sn  |  "
+            f"Atlanan klasörler: {skipped_dirs_count}  |  "
+            f"Atlanan gizli/sistem dosyaları: {skipped_names_count}"
+        )
+        lbl_info = QLabel(info_text)
+        lbl_info.setFont(QFont("Segoe UI", 9))
+        lbl_info.setStyleSheet(f"color: {TEXT_SECONDARY}; background-color: {BG_COLOR};")
+        lbl_info.setWordWrap(True)
+        vbox.addWidget(lbl_info)
+
+        notes: list[str] = []
+        if self._scan_result is not None:
+            sub_note = getattr(self._scan_result, "scan_subfolders_note", "")
+            if sub_note:
+                notes.append(sub_note)
+            else:
+                notes.append("Alt klasörler taranmaz; yalnızca masaüstü üst düzeyi işlenir.")
+            if getattr(self._scan_result, "positions_simulated", False):
+                notes.append("Dosya konumları masaüstü ızgarası üzerinden simüle edilmiştir.")
+
+        if notes:
+            lbl_notes = QLabel(" | ".join(notes))
+            lbl_notes.setFont(QFont("Segoe UI", 8))
+            lbl_notes.setStyleSheet(f"color: {TEXT_DIM}; background-color: {BG_COLOR};")
+            lbl_notes.setWordWrap(True)
+            vbox.addWidget(lbl_notes)
+
+        return vbox
+
+    # ------------------------------------------------------------------
+    # 3 Sekmeli dosya / kategori görünümü
+    # ------------------------------------------------------------------
+
+    def _build_tab_widget(self) -> QTabWidget:
+        tabs = QTabWidget()
+        tabs.setStyleSheet(f"""
+            QTabWidget {{
+                background-color: {BG_COLOR};
+            }}
+            QTabWidget::pane {{
+                background-color: {CARD_BG};
+                border: 1px solid {CARD_BORDER};
+                border-radius: 6px;
+            }}
+            QTabBar {{
+                background-color: {BG_COLOR};
+            }}
+            QTabBar::tab {{
+                background-color: {SECTION_BG};
+                color: {TEXT_SECONDARY};
+                padding: 8px 16px;
+                border: 1px solid {CARD_BORDER};
+                border-bottom: none;
+                border-top-left-radius: 6px;
+                border-top-right-radius: 6px;
+                margin-right: 3px;
+            }}
+            QTabBar::tab:selected {{
+                background-color: {CARD_BG};
+                color: {TEXT_PRIMARY};
+            }}
+            QTabBar::tab:hover:!selected {{
+                background-color: #35373c;
+                color: {TEXT_BODY};
+            }}
+        """)
+
+        success_results = [r for r in self._results if r.status in SUCCESS_STATUSES]
+        problem_results = [r for r in self._results if r.status in PROBLEM_STATUSES]
+
+        skipped_dirs = (
+            list(self._scan_result.skipped_dirs) if self._scan_result else []
+        )
+        skipped_names = (
+            list(self._scan_result.skipped_names) if self._scan_result else []
+        )
+        problem_total = len(problem_results) + len(skipped_dirs) + len(skipped_names)
+
+        tab_success = self._build_success_tab(success_results)
+        tab_cats, active_cat_count = self._build_categories_tab()
+        tab_problem = self._build_problems_tab(
+            problem_results, skipped_dirs, skipped_names
+        )
+
+        tabs.addTab(tab_success, f"Başarılı ({len(success_results)})")
+        tabs.addTab(tab_cats, f"Kategoriler ({active_cat_count})")
+        tabs.addTab(tab_problem, f"Atlanan ve Hatalar ({problem_total})")
+
+        return tabs
+
+    def _build_success_tab(self, results: list[FileResult]) -> QScrollArea:
+        scroll, _container, vbox = _create_scroll_area()
+        if not results:
+            lbl_empty = QLabel("Başarılı işlem yok.")
+            lbl_empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lbl_empty.setFont(QFont("Segoe UI", 10))
+            lbl_empty.setStyleSheet(
+                f"color: {TEXT_DIM}; background-color: {CARD_BG}; padding: 24px;"
             )
-            layout.addWidget(card)
-            self._cards.append(card)
-
-        layout.addStretch()
-        scroll.setWidget(container)
+            vbox.addWidget(lbl_empty)
+        else:
+            for idx, res in enumerate(results):
+                vbox.addWidget(FileRow(res, alt_row=(idx % 2 == 1)))
+        vbox.addStretch()
         return scroll
 
-    # --- Alt butonlar ---
+    def _build_categories_tab(self) -> tuple[QScrollArea, int]:
+        scroll, _container, vbox = _create_scroll_area()
+        vbox.setContentsMargins(12, 12, 12, 12)
+        vbox.setSpacing(8)
+
+        by_cat: dict[str, list[FileResult]] = {}
+        cat_colors: dict[str, str] = {c.name: c.color for c in config.CATEGORIES}
+
+        for res in self._results:
+            if res.item and res.item.category:
+                cname = res.item.category.name
+                cat_colors.setdefault(cname, res.item.category.color)
+                by_cat.setdefault(cname, []).append(res)
+
+        ordered_names = [c.name for c in config.CATEGORIES if c.name in by_cat]
+        for cname in by_cat:
+            if cname not in ordered_names:
+                ordered_names.append(cname)
+
+        if not ordered_names:
+            lbl_empty = QLabel("Kategori verisi yok.")
+            lbl_empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lbl_empty.setFont(QFont("Segoe UI", 10))
+            lbl_empty.setStyleSheet(
+                f"color: {TEXT_DIM}; background-color: {CARD_BG}; padding: 24px;"
+            )
+            vbox.addWidget(lbl_empty)
+        else:
+            for cname in ordered_names:
+                items = by_cat[cname]
+                cat_total = len(items)
+                cat_success = sum(1 for r in items if r.status in SUCCESS_STATUSES)
+                color = cat_colors.get(cname, "#b5bac1")
+                vbox.addWidget(
+                    CategoryProgressCard(
+                        name=cname,
+                        color=color,
+                        success_count=cat_success,
+                        total_count=cat_total,
+                    )
+                )
+
+        vbox.addStretch()
+        return scroll, len(ordered_names)
+
+    def _build_problems_tab(
+        self,
+        problem_results: list[FileResult],
+        skipped_dirs: list[Path],
+        skipped_names: list[str],
+    ) -> QScrollArea:
+        scroll, _container, vbox = _create_scroll_area()
+
+        has_any = bool(problem_results or skipped_dirs or skipped_names)
+        if not has_any:
+            lbl_empty = QLabel("Atlanan dosya veya hata yok.")
+            lbl_empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lbl_empty.setFont(QFont("Segoe UI", 10))
+            lbl_empty.setStyleSheet(
+                f"color: {TEXT_DIM}; background-color: {CARD_BG}; padding: 24px;"
+            )
+            vbox.addWidget(lbl_empty)
+            vbox.addStretch()
+            return scroll
+
+        if problem_results:
+            # Hataları ve iptalleri en üstte göster
+            ordered = sorted(
+                problem_results,
+                key=lambda r: (
+                    0 if r.status == FileStatus.FAILED else (
+                        1 if r.status == FileStatus.CANCELLED else 2
+                    )
+                ),
+            )
+            vbox.addWidget(
+                _SectionHeader(f"İşlem Hataları ve Atlanan Dosyalar ({len(ordered)})")
+            )
+            for idx, res in enumerate(ordered):
+                vbox.addWidget(FileRow(res, alt_row=(idx % 2 == 1)))
+
+        if skipped_dirs:
+            vbox.addWidget(
+                _SectionHeader(f"Atlanan Klasörler ({len(skipped_dirs)})")
+            )
+            for idx, d in enumerate(skipped_dirs):
+                vbox.addWidget(
+                    _SimpleInfoRow(
+                        title=d.name or str(d),
+                        badge="Klasör (taranmadı)",
+                        tooltip=str(d),
+                        alt_row=(idx % 2 == 1),
+                    )
+                )
+
+        if skipped_names:
+            vbox.addWidget(
+                _SectionHeader(f"Atlanan Gizli / Sistem Dosyaları ({len(skipped_names)})")
+            )
+            for idx, name in enumerate(skipped_names):
+                vbox.addWidget(
+                    _SimpleInfoRow(
+                        title=name,
+                        badge="Gizli / sistem dosyası",
+                        tooltip=name,
+                        alt_row=(idx % 2 == 1),
+                    )
+                )
+
+        vbox.addStretch()
+        return scroll
+
+    # ------------------------------------------------------------------
+    # Alt butonlar
+    # ------------------------------------------------------------------
 
     def _build_buttons(self) -> QHBoxLayout:
         layout = QHBoxLayout()
-        layout.setSpacing(12)
+        layout.setSpacing(10)
 
-        btn_open = QPushButton("📁  Klasörü Aç")
-        btn_open.setFixedHeight(42)
+        moved_count = sum(1 for r in self._results if r.status == FileStatus.MOVED)
+        can_open = moved_count > 0 or self._target_root.exists()
+
+        btn_open = QPushButton("Klasörü Aç")
+        btn_open.setFixedHeight(38)
         btn_open.setFont(QFont("Segoe UI", 10, QFont.Weight.Medium))
-        btn_open.setStyleSheet("""
-            QPushButton {
-                background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
-                    stop:0 rgba(60,130,220,220), stop:1 rgba(80,180,255,220));
-                color: white;
-                border: none;
-                border-radius: 10px;
-            }
-            QPushButton:hover  { background: rgba(80,160,255,255); }
-            QPushButton:pressed { background: rgba(50,110,200,255); }
+        btn_open.setEnabled(can_open)
+        if not can_open:
+            btn_open.setToolTip("Taşınan dosya veya mevcut hedef klasör yok.")
+        else:
+            btn_open.setToolTip(str(self._target_root))
+        btn_open.setStyleSheet(f"""
+            QPushButton {{
+                background-color: #40444b;
+                color: {TEXT_PRIMARY};
+                border: 1px solid #4e5058;
+                border-radius: 6px;
+                padding: 0px 18px;
+            }}
+            QPushButton:hover {{
+                background-color: #4f545c;
+                color: #ffffff;
+            }}
+            QPushButton:pressed {{
+                background-color: #36393f;
+            }}
+            QPushButton:disabled {{
+                background-color: {CARD_BG};
+                color: #6d6f78;
+                border: 1px solid {CARD_BORDER};
+            }}
         """)
         btn_open.clicked.connect(self._on_open_folder)
 
-        btn_close = QPushButton("✕  Kapat")
-        btn_close.setFixedHeight(42)
+        btn_close = QPushButton("Kapat")
+        btn_close.setFixedHeight(38)
         btn_close.setFont(QFont("Segoe UI", 10, QFont.Weight.Medium))
         btn_close.setStyleSheet("""
             QPushButton {
-                background: rgba(50, 55, 80, 200);
-                color: rgba(200,205,225,220);
-                border: 1px solid rgba(80,90,120,150);
-                border-radius: 10px;
+                background-color: #5865f2;
+                color: #ffffff;
+                border: 1px solid #5865f2;
+                border-radius: 6px;
+                padding: 0px 24px;
             }
-            QPushButton:hover  { background: rgba(70,78,110,220); }
-            QPushButton:pressed { background: rgba(40,44,65,255); }
+            QPushButton:hover {
+                background-color: #4752c4;
+                border-color: #4752c4;
+            }
+            QPushButton:pressed {
+                background-color: #3c45a5;
+                border-color: #3c45a5;
+            }
+            QPushButton:disabled {
+                background-color: #3b4078;
+                color: #949ba4;
+                border-color: #3b4078;
+            }
         """)
         btn_close.clicked.connect(self._on_close)
 
-        layout.addWidget(btn_open, 2)
-        layout.addWidget(btn_close, 1)
+        layout.addWidget(btn_open)
+        layout.addStretch()
+        layout.addWidget(btn_close)
+
         return layout
-
-    # ------------------------------------------------------------------
-    # Giriş animasyonu (fade-in + yukarı kayma)
-    # ------------------------------------------------------------------
-
-    def _apply_entrance_animation(self) -> None:
-        # Opaklık: 0 → 1
-        self._opacity_effect = QGraphicsOpacityEffect(self)
-        self.setGraphicsEffect(self._opacity_effect)
-        self._opacity_effect.setOpacity(0.0)
-
-        self._fade_anim = QPropertyAnimation(self._opacity_effect, b"opacity")
-        self._fade_anim.setDuration(380)
-        self._fade_anim.setStartValue(0.0)
-        self._fade_anim.setEndValue(1.0)
-        self._fade_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-
-        # Konum: 30px aşağıdan yukarı kayma
-        start_pos = self.pos()
-        end_pos   = self.pos()
-        self.move(start_pos.x(), start_pos.y() + 30)
-
-        self._slide_anim = QPropertyAnimation(self, b"pos")
-        self._slide_anim.setDuration(380)
-        self._slide_anim.setStartValue(self.pos())
-        self._slide_anim.setEndValue(end_pos)
-        self._slide_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-
-        self._fade_anim.start()
-        self._slide_anim.start()
-
-        # Animasyon bittikten sonra kartları sırayla canlandır
-        QTimer.singleShot(400, self._animate_cards)
-
-    def _animate_cards(self) -> None:
-        """Her kartı 80ms arayla canlandır (stagger effect)."""
-        for idx, card in enumerate(self._cards):
-            card.start_animation(delay_ms=idx * 80)
 
     # ------------------------------------------------------------------
     # Buton eylemleri
     # ------------------------------------------------------------------
 
     def _on_open_folder(self) -> None:
-        root = config.get_organized_root()
-        root.mkdir(parents=True, exist_ok=True)
-        open_folder(str(root))
+        if not self._target_root.exists():
+            QMessageBox.warning(
+                self,
+                "Klasör Bulunamadı",
+                f"Hedef klasör mevcut değil:\n{self._target_root}",
+            )
+            return
+
+        ok, err = open_folder(self._target_root)
+        if not ok:
+            QMessageBox.warning(
+                self,
+                "Klasör Açılamadı",
+                f"Hedef klasör açılamadı:\n{err}",
+            )
 
     def _on_close(self) -> None:
-        self.closed.emit()
         self.accept()
