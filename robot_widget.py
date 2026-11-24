@@ -203,8 +203,12 @@ class RobotOverlay(QWidget):
         self._dust:       list[DustDot]  = []
         self._dust_timer: int            = 0
 
-        # Durum metni
+        # Durum metni & tema / hız ayarları
+        settings = config.get_settings()
         self._status: str = "Hazırlanıyor..."
+        self._theme_name: str = getattr(settings, "theme", config.THEME_DARK)
+        self._palette: dict[str, str] = config.get_theme_palette(self._theme_name)
+        self._speed_profile: str = getattr(settings, "robot_speed", config.SPEED_NORMAL)
 
         # PNG pixmap (yoksa None -> geometrik çizim)
         self._robot_pixmap: Optional[QPixmap] = self._load_robot_pixmap()
@@ -322,6 +326,18 @@ class RobotOverlay(QWidget):
         self._status = text
         self.update()
 
+    def set_theme(self, theme_name: str) -> None:
+        """Durum çubuğu temasını güncelle ve yeniden çiz."""
+        self._theme_name = theme_name
+        self._palette = config.get_theme_palette(theme_name)
+        self.update()
+
+    def set_speed(self, speed_profile: str) -> None:
+        """Robot hareket hız profilini ('slow'|'normal'|'fast') güncelle."""
+        self._speed_profile = (
+            speed_profile if speed_profile in config.VALID_SPEEDS else config.SPEED_NORMAL
+        )
+
     def cancel(self) -> None:
         """Animasyonu temizce durdur ve zamanlayıcıyı kapat."""
         self._finished     = True
@@ -433,7 +449,8 @@ class RobotOverlay(QWidget):
             self._status = f"Yutuldu: {label}"
             self.target_reached.emit(reached_idx)
         else:
-            speed     = max(config.ROBOT_SPEED_MIN, min(config.ROBOT_SPEED_MAX, dist * 0.08))
+            s_min, s_max, dist_factor = config.get_robot_speed_params(self._speed_profile)
+            speed     = max(s_min, min(s_max, dist * dist_factor))
             self._rx += (dx / dist) * speed
             self._ry += (dy / dist) * speed
             # Hareket esnasında %0.3 ihtimalle balon
@@ -764,32 +781,52 @@ class RobotOverlay(QWidget):
         if not self._status:
             return
 
-        font = QFont("Segoe UI", 11) if self._screen_w > 1920 else QFont("Sans", 10)
-        font.setBold(True)
+        pal = self._palette
+        font = QFont("Segoe UI", 10 if self._screen_w > 1920 else 9, QFont.Weight.DemiBold)
         p.setFont(font)
         fm = QFontMetrics(font)
 
-        pad_x      = 20
-        pad_y      = 10
-        max_pill_w = max(80, self._screen_w - 40)
-        max_text_w = max(20, max_pill_w - pad_x * 2)
+        pad_left   = 22
+        pad_right  = 16
+        pad_y      = 9
+        max_bar_w  = max(120, self._screen_w - 40)
+        max_text_w = max(40, max_bar_w - pad_left - pad_right)
 
         text   = fm.elidedText(self._status, Qt.TextElideMode.ElideRight, max_text_w)
         tw     = fm.horizontalAdvance(text)
         th     = fm.height()
-        pill_w = min(tw + pad_x * 2, max_pill_w)
-        pill_h = th + pad_y * 2
-        pill_x = (self._screen_w - pill_w) / 2
-        pill_y = self._screen_h - pill_h - 24
+        bar_w  = min(tw + pad_left + pad_right, max_bar_w)
+        bar_h  = th + pad_y * 2
+        bar_x  = (self._screen_w - bar_w) / 2
+        bar_y  = self._screen_h - bar_h - 24
 
         p.save()
-        p.setBrush(QBrush(QColor(10, 10, 20, 200)))
-        p.setPen(QPen(QColor(80, 80, 100, 160), 1))
-        p.drawRoundedRect(QRectF(pill_x, pill_y, pill_w, pill_h),
-                          pill_h / 2, pill_h / 2)
-        p.setPen(QPen(QColor(230, 230, 240)))
-        p.drawText(QRectF(pill_x + pad_x, pill_y, pill_w - pad_x * 2, pill_h),
-                   Qt.AlignmentFlag.AlignCenter, text)
+        # Modern, ince kenarlıklı, opak tema uyumlu durum çubuğu (border-radius: 10px)
+        p.setBrush(QBrush(QColor(pal["surface"])))
+        p.setPen(QPen(QColor(pal["border"]), 1.0))
+        p.drawRoundedRect(QRectF(bar_x, bar_y, bar_w, bar_h), 10.0, 10.0)
+
+        # Sol kenarda ince durum vurgu çizgisi
+        accent_color = (
+            pal["status_moved"]
+            if ("Hazır" in self._status or "tamam" in self._status.lower() or "temizlendi" in self._status.lower())
+            else (
+                pal["status_failed"]
+                if "iptal" in self._status.lower()
+                else pal["accent"]
+            )
+        )
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(QColor(accent_color)))
+        p.drawRoundedRect(QRectF(bar_x + 9, bar_y + 8, 3.0, bar_h - 16), 1.5, 1.5)
+
+        # Metin
+        p.setPen(QPen(QColor(pal["text"])))
+        p.drawText(
+            QRectF(bar_x + pad_left, bar_y, bar_w - pad_left - pad_right, bar_h),
+            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+            text,
+        )
         p.restore()
 
     # -------------------------------------------------------------------

@@ -131,6 +131,36 @@ class TestAppSettingsDefaults:
             assert cat.name in s.category_rules
             assert s.category_rules[cat.name] == ACTION_MOVE
 
+    def test_defaults_theme_and_robot_speed(self):
+        s = AppSettings()
+        assert s.theme == config.THEME_DARK
+        assert s.robot_speed == config.SPEED_NORMAL
+
+    def test_invalid_theme_and_speed_fallback_to_defaults(self):
+        s = AppSettings(theme="neon_pink", robot_speed="warp_9")
+        assert s.theme == config.THEME_DARK
+        assert s.robot_speed == config.SPEED_NORMAL
+
+    def test_theme_palettes_have_opaque_hex_colors(self):
+        for theme_name in config.VALID_THEMES:
+            pal = config.get_theme_palette(theme_name)
+            for key, val in pal.items():
+                if key == "name":
+                    continue
+                assert val.startswith("#"), f"{theme_name}.{key} must be hex, got {val!r}"
+                assert "rgba" not in val.lower() and "transparent" not in val.lower()
+
+    def test_robot_speed_params_ordering_and_calmer_normal(self):
+        s_min, s_max, s_fac = config.get_robot_speed_params(config.SPEED_SLOW)
+        n_min, n_max, n_fac = config.get_robot_speed_params(config.SPEED_NORMAL)
+        f_min, f_max, f_fac = config.get_robot_speed_params(config.SPEED_FAST)
+        assert s_min < n_min < f_min
+        assert s_max < n_max < f_max
+        assert s_fac < n_fac < f_fac
+        # Normal speed ~65% of old 2.0 / 7.0 / 0.08
+        assert 1.1 <= n_min <= 1.5
+        assert 4.0 <= n_max <= 5.0
+
 
 # ---------------------------------------------------------------------------
 # AppSettings save / load round-trip
@@ -184,6 +214,21 @@ class TestAppSettingsSaveLoad:
         s.save()
         loaded = AppSettings.load()
         assert loaded.custom_target == custom
+
+    def test_roundtrip_theme_and_robot_speed(self, monkeypatch, tmp_path):
+        self._patch_settings_path(monkeypatch, tmp_path)
+        for theme_name in config.VALID_THEMES:
+            for speed_name in config.VALID_SPEEDS:
+                s = AppSettings(theme=theme_name, robot_speed=speed_name)
+                s.save()
+                loaded = AppSettings.load()
+                assert loaded.theme == theme_name
+                assert loaded.robot_speed == speed_name
+
+    def test_from_dict_invalid_theme_and_speed_fallback(self):
+        loaded = AppSettings.from_dict({"theme": "invalid", "robot_speed": "supersonic"})
+        assert loaded.theme == config.THEME_DARK
+        assert loaded.robot_speed == config.SPEED_NORMAL
 
     def test_missing_file_returns_defaults(self, monkeypatch, tmp_path):
         self._patch_settings_path(monkeypatch, tmp_path)

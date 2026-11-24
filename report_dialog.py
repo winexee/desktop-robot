@@ -111,61 +111,73 @@ def open_folder(path: str | Path) -> tuple[bool, str]:
         return False, str(exc)
 
 
-def _status_display(result: FileResult) -> tuple[str, str]:
+def _status_display(
+    result: FileResult,
+    pal: Optional[dict[str, str]] = None,
+) -> tuple[str, str]:
     """FileResult için (gösterim metni, hex renk) döndürür."""
+    p = pal or config.get_theme_palette()
     s = result.status
     if s == FileStatus.MOVED:
-        return "Taşındı", COLOR_MOVED
+        return "Taşındı", p["status_moved"]
     if s == FileStatus.TRASHED:
-        return "Çöp Kutusu", COLOR_TRASHED
+        return "Çöp Kutusu", p["status_trashed"]
     if s == FileStatus.DELETED_PERMANENTLY:
-        return "Kalıcı Silindi", COLOR_DELETED
+        return "Kalıcı Silindi", p["status_deleted"]
     if s == FileStatus.SKIPPED:
-        return "Atlandı", COLOR_SKIPPED
+        return "Atlandı", p["status_skipped"]
     if s == FileStatus.FAILED:
-        return "Başarısız", COLOR_FAILED
+        return "Başarısız", p["status_failed"]
     if s == FileStatus.CANCELLED:
-        return "İptal Edildi", COLOR_FAILED
-    return "Bilinmiyor", TEXT_DIM
+        return "İptal Edildi", p["status_failed"]
+    return "Bilinmiyor", p["dim"]
 
 
-def _create_scroll_area() -> tuple[QScrollArea, QWidget, QVBoxLayout]:
-    """Opak koyu temalı standart bir QScrollArea ve içerik yerleşimi oluşturur."""
+def _create_scroll_area(
+    pal: Optional[dict[str, str]] = None,
+) -> tuple[QScrollArea, QWidget, QVBoxLayout]:
+    """Opak tema uyumlu standart bir QScrollArea ve içerik yerleşimi oluşturur."""
+    p = pal or config.get_theme_palette()
+    bg = p["bg"]
+    card_bg = p["surface"]
+    handle_bg = p["chip_off_bg"]
+    handle_hv = p["chip_off_hv"]
+
     scroll = QScrollArea()
     scroll.setWidgetResizable(True)
     scroll.setFrameShape(QFrame.Shape.NoFrame)
     scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
     scroll.setStyleSheet(f"""
         QScrollArea {{
-            background-color: {CARD_BG};
+            background-color: {card_bg};
             border: none;
         }}
         QScrollBar:vertical {{
-            background-color: {BG_COLOR};
+            background-color: {bg};
             width: 8px;
             border-radius: 4px;
             margin: 2px;
         }}
         QScrollBar::handle:vertical {{
-            background-color: #4e5058;
+            background-color: {handle_bg};
             border-radius: 4px;
             min-height: 24px;
         }}
         QScrollBar::handle:vertical:hover {{
-            background-color: #6d6f78;
+            background-color: {handle_hv};
         }}
         QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
             height: 0px;
-            background-color: {BG_COLOR};
+            background-color: {bg};
         }}
         QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
-            background-color: {BG_COLOR};
+            background-color: {bg};
         }}
     """)
 
     container = QWidget()
     container.setObjectName("scrollContainer")
-    container.setStyleSheet(f"QWidget#scrollContainer {{ background-color: {CARD_BG}; }}")
+    container.setStyleSheet(f"QWidget#scrollContainer {{ background-color: {card_bg}; }}")
 
     vbox = QVBoxLayout(container)
     vbox.setContentsMargins(0, 0, 0, 0)
@@ -173,7 +185,7 @@ def _create_scroll_area() -> tuple[QScrollArea, QWidget, QVBoxLayout]:
 
     scroll.setWidget(container)
     if scroll.viewport():
-        scroll.viewport().setStyleSheet(f"background-color: {CARD_BG};")
+        scroll.viewport().setStyleSheet(f"background-color: {card_bg};")
 
     return scroll, container, vbox
 
@@ -193,14 +205,20 @@ class SummaryCard(QFrame):
         label: str,
         count: int,
         color: str,
+        pal: Optional[dict[str, str]] = None,
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
+        p = pal or config.get_theme_palette()
+        card_bg = p["surface"]
+        border = p["border"]
+        sec_txt = p["muted"]
+
         self.setObjectName("summaryCard")
         self.setStyleSheet(f"""
             QFrame#summaryCard {{
-                background-color: {CARD_BG};
-                border: 1px solid {CARD_BORDER};
+                background-color: {card_bg};
+                border: 1px solid {border};
                 border-radius: 8px;
             }}
         """)
@@ -215,14 +233,14 @@ class SummaryCard(QFrame):
         lbl_count = QLabel(str(count))
         lbl_count.setFont(QFont("Segoe UI", 20, QFont.Weight.Bold))
         lbl_count.setStyleSheet(
-            f"color: {color}; background-color: {CARD_BG}; border: none;"
+            f"color: {color}; background-color: {card_bg}; border: none;"
         )
         lbl_count.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         lbl_name = QLabel(label)
         lbl_name.setFont(QFont("Segoe UI", 9))
         lbl_name.setStyleSheet(
-            f"color: {TEXT_SECONDARY}; background-color: {CARD_BG}; border: none;"
+            f"color: {sec_txt}; background-color: {card_bg}; border: none;"
         )
         lbl_name.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
@@ -246,14 +264,20 @@ class CategoryProgressCard(QFrame):
         color: str,
         success_count: int,
         total_count: int,
+        pal: Optional[dict[str, str]] = None,
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
+        p = pal or config.get_theme_palette()
+        row_bg = p["surface2"]
+        border = p["border"]
+        bg = p["bg"]
+
         self.setObjectName("categoryCard")
         self.setStyleSheet(f"""
             QFrame#categoryCard {{
-                background-color: {ROW_ALT_BG};
-                border: 1px solid {CARD_BORDER};
+                background-color: {row_bg};
+                border: 1px solid {border};
                 border-radius: 8px;
             }}
         """)
@@ -276,13 +300,13 @@ class CategoryProgressCard(QFrame):
         lbl_name = QLabel(name)
         lbl_name.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
         lbl_name.setStyleSheet(
-            f"color: {TEXT_PRIMARY}; background-color: {ROW_ALT_BG}; border: none;"
+            f"color: {p['text']}; background-color: {row_bg}; border: none;"
         )
 
         lbl_ratio = QLabel(f"{success_count} / {total_count}")
         lbl_ratio.setFont(QFont("Segoe UI", 9, QFont.Weight.Medium))
         lbl_ratio.setStyleSheet(
-            f"color: {TEXT_SECONDARY}; background-color: {ROW_ALT_BG}; border: none;"
+            f"color: {p['muted']}; background-color: {row_bg}; border: none;"
         )
         lbl_ratio.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
@@ -298,8 +322,8 @@ class CategoryProgressCard(QFrame):
         bar.setValue(min(success_count, max(1, total_count)) if total_count > 0 else 0)
         bar.setStyleSheet(f"""
             QProgressBar {{
-                background-color: {BG_COLOR};
-                border: 1px solid {CARD_BORDER};
+                background-color: {bg};
+                border: 1px solid {border};
                 border-radius: 5px;
             }}
             QProgressBar::chunk {{
@@ -326,12 +350,14 @@ class FileRow(QWidget):
         self,
         result: FileResult,
         alt_row: bool = False,
+        pal: Optional[dict[str, str]] = None,
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        p = pal or config.get_theme_palette()
 
-        bg = ROW_ALT_BG if alt_row else CARD_BG
+        bg = p["surface2"] if alt_row else p["surface"]
         self.setObjectName("fileRow")
         self.setStyleSheet(f"QWidget#fileRow {{ background-color: {bg}; }}")
         self.setMinimumHeight(44)
@@ -347,7 +373,7 @@ class FileRow(QWidget):
         filename = result.item.path.name if result.item and result.item.path else "?"
         lbl_name = QLabel(filename)
         lbl_name.setFont(QFont("Segoe UI", 9, QFont.Weight.Medium))
-        lbl_name.setStyleSheet(f"color: {TEXT_PRIMARY}; background-color: {bg};")
+        lbl_name.setStyleSheet(f"color: {p['text']}; background-color: {bg};")
         lbl_name.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         lbl_name.setWordWrap(False)
 
@@ -361,11 +387,11 @@ class FileRow(QWidget):
 
         # Alt satır: hata mesajı veya hedef yolu
         sub_text = ""
-        sub_color = TEXT_DIM
+        sub_color = p["dim"]
         if result.error_msg:
             sub_text = result.error_msg
             if result.status in (FileStatus.FAILED, FileStatus.CANCELLED):
-                sub_color = "#f38682"
+                sub_color = p["status_failed"]
         elif result.dest is not None:
             sub_text = f"Hedef: {result.dest}"
 
@@ -377,7 +403,7 @@ class FileRow(QWidget):
             lbl_sub.setToolTip(sub_text)
             left_col.addWidget(lbl_sub)
 
-        status_text, status_color = _status_display(result)
+        status_text, status_color = _status_display(result, p)
         lbl_status = QLabel(status_text)
         lbl_status.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
         lbl_status.setStyleSheet(f"color: {status_color}; background-color: {bg};")
@@ -397,12 +423,14 @@ class _SimpleInfoRow(QWidget):
         badge: str,
         tooltip: str = "",
         alt_row: bool = False,
+        pal: Optional[dict[str, str]] = None,
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        p = pal or config.get_theme_palette()
 
-        bg = ROW_ALT_BG if alt_row else CARD_BG
+        bg = p["surface2"] if alt_row else p["surface"]
         self.setObjectName("infoRow")
         self.setStyleSheet(f"QWidget#infoRow {{ background-color: {bg}; }}")
         self.setMinimumHeight(36)
@@ -413,14 +441,14 @@ class _SimpleInfoRow(QWidget):
 
         lbl_title = QLabel(title)
         lbl_title.setFont(QFont("Segoe UI", 9))
-        lbl_title.setStyleSheet(f"color: {TEXT_BODY}; background-color: {bg};")
+        lbl_title.setStyleSheet(f"color: {p['text_body']}; background-color: {bg};")
         lbl_title.setWordWrap(False)
         if tooltip:
             lbl_title.setToolTip(tooltip)
 
         lbl_badge = QLabel(badge)
         lbl_badge.setFont(QFont("Segoe UI", 8))
-        lbl_badge.setStyleSheet(f"color: {TEXT_DIM}; background-color: {bg};")
+        lbl_badge.setStyleSheet(f"color: {p['dim']}; background-color: {bg};")
         lbl_badge.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
         layout.addWidget(lbl_title, 1)
@@ -430,13 +458,22 @@ class _SimpleInfoRow(QWidget):
 class _SectionHeader(QWidget):
     """Liste içi bölüm başlığı."""
 
-    def __init__(self, text: str, parent: Optional[QWidget] = None) -> None:
+    def __init__(
+        self,
+        text: str,
+        pal: Optional[dict[str, str]] = None,
+        parent: Optional[QWidget] = None,
+    ) -> None:
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        p = pal or config.get_theme_palette()
+        sec_bg = p["section"]
+        border = p["border"]
+
         self.setObjectName("sectionHeader")
         self.setStyleSheet(
-            f"QWidget#sectionHeader {{ background-color: {SECTION_BG}; "
-            f"border-top: 1px solid {CARD_BORDER}; border-bottom: 1px solid {CARD_BORDER}; }}"
+            f"QWidget#sectionHeader {{ background-color: {sec_bg}; "
+            f"border-top: 1px solid {border}; border-bottom: 1px solid {border}; }}"
         )
 
         layout = QHBoxLayout(self)
@@ -444,7 +481,7 @@ class _SectionHeader(QWidget):
 
         lbl = QLabel(text)
         lbl.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
-        lbl.setStyleSheet(f"color: {TEXT_SECONDARY}; background-color: {SECTION_BG};")
+        lbl.setStyleSheet(f"color: {p['muted']}; background-color: {sec_bg};")
         layout.addWidget(lbl)
 
 
@@ -470,6 +507,7 @@ class ReportDialog(QDialog):
         elapsed: float,
         target_root: Path,
         scan_result: Optional[ScanResult] = None,
+        theme: Optional[str] = None,
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
@@ -481,6 +519,7 @@ class ReportDialog(QDialog):
             else config.get_organized_root()
         )
         self._scan_result = scan_result
+        self._pal = config.get_theme_palette(theme)
         self._closed_emitted = False
 
         self._setup_window()
@@ -491,6 +530,7 @@ class ReportDialog(QDialog):
     # ------------------------------------------------------------------
 
     def _setup_window(self) -> None:
+        p = self._pal
         self.setWindowTitle("Temizlik Raporu")
         self.setMinimumSize(600, 660)
         self.resize(DIALOG_W, DIALOG_H)
@@ -498,13 +538,27 @@ class ReportDialog(QDialog):
 
         self.setStyleSheet(f"""
             QDialog {{
-                background-color: {BG_COLOR};
-                color: {TEXT_BODY};
+                background-color: {p['bg']};
+                color: {p['text_body']};
             }}
             QMessageBox {{
-                background-color: {BG_COLOR};
-                color: {TEXT_BODY};
+                background-color: {p['bg']};
+                color: {p['text']};
             }}
+            QMessageBox QLabel {{
+                background-color: {p['bg']};
+                color: {p['text']};
+            }}
+            QMessageBox QPushButton {{
+                background-color: {p['hover']};
+                color: {p['text']};
+                border: 1px solid {p['border']};
+                border-radius: 5px;
+                padding: 5px 16px;
+                min-width: 68px;
+            }}
+            QMessageBox QPushButton:hover {{ background-color: {p['pressed']}; }}
+            QMessageBox QPushButton:pressed {{ background-color: {p['surface']}; }}
         """)
 
     def _emit_closed_once(self) -> None:
@@ -533,13 +587,14 @@ class ReportDialog(QDialog):
     # ------------------------------------------------------------------
 
     def _build_ui(self) -> None:
+        p = self._pal
         root_layout = QVBoxLayout(self)
         root_layout.setContentsMargins(16, 16, 16, 16)
         root_layout.setSpacing(10)
 
         lbl_title = QLabel("Temizlik Raporu")
         lbl_title.setFont(QFont("Segoe UI", 15, QFont.Weight.Bold))
-        lbl_title.setStyleSheet(f"color: {TEXT_PRIMARY}; background-color: {BG_COLOR};")
+        lbl_title.setStyleSheet(f"color: {p['text']}; background-color: {p['bg']};")
         root_layout.addWidget(lbl_title)
 
         # Üst özet kartları
@@ -555,6 +610,7 @@ class ReportDialog(QDialog):
         root_layout.addLayout(self._build_buttons())
 
     def _build_summary_cards(self) -> QHBoxLayout:
+        p = self._pal
         layout = QHBoxLayout()
         layout.setSpacing(8)
 
@@ -568,22 +624,23 @@ class ReportDialog(QDialog):
         )
 
         cards: list[tuple[str, int, str]] = [
-            ("Taşınan",      moved_count,   COLOR_MOVED),
-            ("Çöp Kutusu",   trashed_count, COLOR_TRASHED),
+            ("Taşınan",      moved_count,   p["status_moved"]),
+            ("Çöp Kutusu",   trashed_count, p["status_trashed"]),
         ]
         if deleted_count > 0:
-            cards.append(("Kalıcı Silinen", deleted_count, COLOR_DELETED))
+            cards.append(("Kalıcı Silinen", deleted_count, p["status_deleted"]))
         cards.extend([
-            ("Atlanan",      skipped_count, COLOR_SKIPPED),
-            ("Başarısız",    failed_count,  COLOR_FAILED),
+            ("Atlanan",      skipped_count, p["status_skipped"]),
+            ("Başarısız",    failed_count,  p["status_failed"]),
         ])
 
         for label, count, color in cards:
-            layout.addWidget(SummaryCard(label, count, color))
+            layout.addWidget(SummaryCard(label, count, color, pal=p))
 
         return layout
 
     def _build_info_section(self) -> QVBoxLayout:
+        p = self._pal
         vbox = QVBoxLayout()
         vbox.setContentsMargins(0, 2, 0, 2)
         vbox.setSpacing(2)
@@ -602,7 +659,7 @@ class ReportDialog(QDialog):
         )
         lbl_info = QLabel(info_text)
         lbl_info.setFont(QFont("Segoe UI", 9))
-        lbl_info.setStyleSheet(f"color: {TEXT_SECONDARY}; background-color: {BG_COLOR};")
+        lbl_info.setStyleSheet(f"color: {p['muted']}; background-color: {p['bg']};")
         lbl_info.setWordWrap(True)
         vbox.addWidget(lbl_info)
 
@@ -619,7 +676,7 @@ class ReportDialog(QDialog):
         if notes:
             lbl_notes = QLabel(" | ".join(notes))
             lbl_notes.setFont(QFont("Segoe UI", 8))
-            lbl_notes.setStyleSheet(f"color: {TEXT_DIM}; background-color: {BG_COLOR};")
+            lbl_notes.setStyleSheet(f"color: {p['dim']}; background-color: {p['bg']};")
             lbl_notes.setWordWrap(True)
             vbox.addWidget(lbl_notes)
 
@@ -630,36 +687,37 @@ class ReportDialog(QDialog):
     # ------------------------------------------------------------------
 
     def _build_tab_widget(self) -> QTabWidget:
+        p = self._pal
         tabs = QTabWidget()
         tabs.setStyleSheet(f"""
             QTabWidget {{
-                background-color: {BG_COLOR};
+                background-color: {p['bg']};
             }}
             QTabWidget::pane {{
-                background-color: {CARD_BG};
-                border: 1px solid {CARD_BORDER};
+                background-color: {p['surface']};
+                border: 1px solid {p['border']};
                 border-radius: 6px;
             }}
             QTabBar {{
-                background-color: {BG_COLOR};
+                background-color: {p['bg']};
             }}
             QTabBar::tab {{
-                background-color: {SECTION_BG};
-                color: {TEXT_SECONDARY};
+                background-color: {p['section']};
+                color: {p['muted']};
                 padding: 8px 16px;
-                border: 1px solid {CARD_BORDER};
+                border: 1px solid {p['border']};
                 border-bottom: none;
                 border-top-left-radius: 6px;
                 border-top-right-radius: 6px;
                 margin-right: 3px;
             }}
             QTabBar::tab:selected {{
-                background-color: {CARD_BG};
-                color: {TEXT_PRIMARY};
+                background-color: {p['surface']};
+                color: {p['text']};
             }}
             QTabBar::tab:hover:!selected {{
-                background-color: #35373c;
-                color: {TEXT_BODY};
+                background-color: {p['hover']};
+                color: {p['text_body']};
             }}
         """)
 
@@ -687,23 +745,25 @@ class ReportDialog(QDialog):
         return tabs
 
     def _build_success_tab(self, results: list[FileResult]) -> QScrollArea:
-        scroll, _container, vbox = _create_scroll_area()
+        p = self._pal
+        scroll, _container, vbox = _create_scroll_area(p)
         if not results:
             lbl_empty = QLabel("Başarılı işlem yok.")
             lbl_empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
             lbl_empty.setFont(QFont("Segoe UI", 10))
             lbl_empty.setStyleSheet(
-                f"color: {TEXT_DIM}; background-color: {CARD_BG}; padding: 24px;"
+                f"color: {p['dim']}; background-color: {p['surface']}; padding: 24px;"
             )
             vbox.addWidget(lbl_empty)
         else:
             for idx, res in enumerate(results):
-                vbox.addWidget(FileRow(res, alt_row=(idx % 2 == 1)))
+                vbox.addWidget(FileRow(res, alt_row=(idx % 2 == 1), pal=p))
         vbox.addStretch()
         return scroll
 
     def _build_categories_tab(self) -> tuple[QScrollArea, int]:
-        scroll, _container, vbox = _create_scroll_area()
+        p = self._pal
+        scroll, _container, vbox = _create_scroll_area(p)
         vbox.setContentsMargins(12, 12, 12, 12)
         vbox.setSpacing(8)
 
@@ -726,7 +786,7 @@ class ReportDialog(QDialog):
             lbl_empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
             lbl_empty.setFont(QFont("Segoe UI", 10))
             lbl_empty.setStyleSheet(
-                f"color: {TEXT_DIM}; background-color: {CARD_BG}; padding: 24px;"
+                f"color: {p['dim']}; background-color: {p['surface']}; padding: 24px;"
             )
             vbox.addWidget(lbl_empty)
         else:
@@ -734,13 +794,14 @@ class ReportDialog(QDialog):
                 items = by_cat[cname]
                 cat_total = len(items)
                 cat_success = sum(1 for r in items if r.status in SUCCESS_STATUSES)
-                color = cat_colors.get(cname, "#b5bac1")
+                color = cat_colors.get(cname, p["muted"])
                 vbox.addWidget(
                     CategoryProgressCard(
                         name=cname,
                         color=color,
                         success_count=cat_success,
                         total_count=cat_total,
+                        pal=p,
                     )
                 )
 
@@ -753,7 +814,8 @@ class ReportDialog(QDialog):
         skipped_dirs: list[Path],
         skipped_names: list[str],
     ) -> QScrollArea:
-        scroll, _container, vbox = _create_scroll_area()
+        p = self._pal
+        scroll, _container, vbox = _create_scroll_area(p)
 
         has_any = bool(problem_results or skipped_dirs or skipped_names)
         if not has_any:
@@ -761,14 +823,13 @@ class ReportDialog(QDialog):
             lbl_empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
             lbl_empty.setFont(QFont("Segoe UI", 10))
             lbl_empty.setStyleSheet(
-                f"color: {TEXT_DIM}; background-color: {CARD_BG}; padding: 24px;"
+                f"color: {p['dim']}; background-color: {p['surface']}; padding: 24px;"
             )
             vbox.addWidget(lbl_empty)
             vbox.addStretch()
             return scroll
 
         if problem_results:
-            # Hataları ve iptalleri en üstte göster
             ordered = sorted(
                 problem_results,
                 key=lambda r: (
@@ -778,14 +839,14 @@ class ReportDialog(QDialog):
                 ),
             )
             vbox.addWidget(
-                _SectionHeader(f"İşlem Hataları ve Atlanan Dosyalar ({len(ordered)})")
+                _SectionHeader(f"İşlem Hataları ve Atlanan Dosyalar ({len(ordered)})", pal=p)
             )
             for idx, res in enumerate(ordered):
-                vbox.addWidget(FileRow(res, alt_row=(idx % 2 == 1)))
+                vbox.addWidget(FileRow(res, alt_row=(idx % 2 == 1), pal=p))
 
         if skipped_dirs:
             vbox.addWidget(
-                _SectionHeader(f"Atlanan Klasörler ({len(skipped_dirs)})")
+                _SectionHeader(f"Atlanan Klasörler ({len(skipped_dirs)})", pal=p)
             )
             for idx, d in enumerate(skipped_dirs):
                 vbox.addWidget(
@@ -794,12 +855,13 @@ class ReportDialog(QDialog):
                         badge="Klasör (taranmadı)",
                         tooltip=str(d),
                         alt_row=(idx % 2 == 1),
+                        pal=p,
                     )
                 )
 
         if skipped_names:
             vbox.addWidget(
-                _SectionHeader(f"Atlanan Gizli / Sistem Dosyaları ({len(skipped_names)})")
+                _SectionHeader(f"Atlanan Gizli / Sistem Dosyaları ({len(skipped_names)})", pal=p)
             )
             for idx, name in enumerate(skipped_names):
                 vbox.addWidget(
@@ -808,6 +870,7 @@ class ReportDialog(QDialog):
                         badge="Gizli / sistem dosyası",
                         tooltip=name,
                         alt_row=(idx % 2 == 1),
+                        pal=p,
                     )
                 )
 
@@ -819,6 +882,7 @@ class ReportDialog(QDialog):
     # ------------------------------------------------------------------
 
     def _build_buttons(self) -> QHBoxLayout:
+        p = self._pal
         layout = QHBoxLayout()
         layout.setSpacing(10)
 
@@ -835,23 +899,23 @@ class ReportDialog(QDialog):
             btn_open.setToolTip(str(self._target_root))
         btn_open.setStyleSheet(f"""
             QPushButton {{
-                background-color: #40444b;
-                color: {TEXT_PRIMARY};
-                border: 1px solid #4e5058;
+                background-color: {p['chip_off_bg']};
+                color: {p['text']};
+                border: 1px solid {p['border']};
                 border-radius: 6px;
                 padding: 0px 18px;
             }}
             QPushButton:hover {{
-                background-color: #4f545c;
-                color: #ffffff;
+                background-color: {p['chip_off_hv']};
+                color: {p['text']};
             }}
             QPushButton:pressed {{
-                background-color: #36393f;
+                background-color: {p['chip_off_pr']};
             }}
             QPushButton:disabled {{
-                background-color: {CARD_BG};
-                color: #6d6f78;
-                border: 1px solid {CARD_BORDER};
+                background-color: {p['disabled_bg']};
+                color: {p['disabled_fg']};
+                border: 1px solid {p['border']};
             }}
         """)
         btn_open.clicked.connect(self._on_open_folder)
@@ -859,27 +923,27 @@ class ReportDialog(QDialog):
         btn_close = QPushButton("Kapat")
         btn_close.setFixedHeight(38)
         btn_close.setFont(QFont("Segoe UI", 10, QFont.Weight.Medium))
-        btn_close.setStyleSheet("""
-            QPushButton {
-                background-color: #5865f2;
-                color: #ffffff;
-                border: 1px solid #5865f2;
+        btn_close.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {p['accent']};
+                color: {p['accent_fg']};
+                border: 1px solid {p['accent']};
                 border-radius: 6px;
                 padding: 0px 24px;
-            }
-            QPushButton:hover {
-                background-color: #4752c4;
-                border-color: #4752c4;
-            }
-            QPushButton:pressed {
-                background-color: #3c45a5;
-                border-color: #3c45a5;
-            }
-            QPushButton:disabled {
-                background-color: #3b4078;
-                color: #949ba4;
-                border-color: #3b4078;
-            }
+            }}
+            QPushButton:hover {{
+                background-color: {p['accent_hover']};
+                border-color: {p['accent_hover']};
+            }}
+            QPushButton:pressed {{
+                background-color: {p['accent_pressed']};
+                border-color: {p['accent_pressed']};
+            }}
+            QPushButton:disabled {{
+                background-color: {p['disabled_bg']};
+                color: {p['disabled_fg']};
+                border-color: {p['border']};
+            }}
         """)
         btn_close.clicked.connect(self._on_close)
 

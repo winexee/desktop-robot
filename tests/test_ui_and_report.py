@@ -19,7 +19,8 @@ PROJECT_ROOT = pathlib.Path(__file__).parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from PyQt6.QtCore import QPointF
+from PyQt6.QtCore import QEvent, QPointF, Qt
+from PyQt6.QtGui import QMouseEvent
 from PyQt6.QtWidgets import QApplication, QLabel, QMessageBox, QProgressBar
 
 _app = QApplication.instance() or QApplication(sys.argv)
@@ -32,10 +33,15 @@ from config import (
     ACTION_TRASH,
     AppSettings,
     CATEGORIES,
+    SPEED_FAST,
+    SPEED_SLOW,
+    THEME_DARK,
+    THEME_LIGHT,
+    THEME_MIDNIGHT,
 )
 from file_mover import FileResult, FileStatus
 from file_scanner import FileItem, ScanResult
-from main import _ConfirmCleanDialog
+from main import ControlPanel, _ConfirmCleanDialog
 from report_dialog import CategoryProgressCard, ReportDialog, SummaryCard
 from robot_widget import RobotOverlay
 from settings_dialog import SettingsDialog
@@ -78,19 +84,59 @@ def _make_result(tmp_path: pathlib.Path, fname: str, cat_name: str, status: File
 # ---------------------------------------------------------------------------
 
 class TestSettingsDialog:
-    def test_four_tab_navigation(self, qapp):
+    def test_five_tab_navigation(self, qapp):
         dlg = SettingsDialog(AppSettings())
         try:
-            assert len(dlg._sb_btns) == 4
-            assert dlg._stack.count() == 4
+            assert len(dlg._sb_btns) == 5
+            assert dlg._stack.count() == 5
             assert dlg._stack.currentIndex() == 0
             assert dlg._sb_btns[0].isChecked() is True
+            assert [b.text() for b in dlg._sb_btns] == [
+                "Kategori Kuralları",
+                "Hedef Klasör",
+                "Görünüm",
+                "Güvenlik ve Gelişmiş",
+                "Hakkında",
+            ]
 
-            for idx in range(4):
+            for idx in range(5):
                 dlg._sb_btns[idx].click()
                 assert dlg._stack.currentIndex() == idx
                 checked = [b.isChecked() for b in dlg._sb_btns]
-                assert checked == [i == idx for i in range(4)]
+                assert checked == [i == idx for i in range(5)]
+        finally:
+            dlg.close()
+
+    def test_appearance_tab_theme_preview_and_save(self, qapp, isolated_env):
+        _, _, _, fake_settings_path = isolated_env
+        previews: list[str] = []
+        saved_events: list[AppSettings] = []
+
+        dlg = SettingsDialog(AppSettings())
+        dlg.theme_preview_requested.connect(previews.append)
+        dlg.settings_saved.connect(saved_events.append)
+        try:
+            # Switch to Görünüm tab (index 2)
+            dlg._sb_btns[2].click()
+            assert dlg._stack.currentIndex() == 2
+
+            dlg._page_appearance._theme_btns[THEME_LIGHT].click()
+            assert previews == [THEME_LIGHT]
+            assert dlg._pal["bg"] == config.THEMES[THEME_LIGHT]["bg"]
+
+            dlg._page_appearance._theme_btns[THEME_MIDNIGHT].click()
+            assert previews == [THEME_LIGHT, THEME_MIDNIGHT]
+
+            dlg._page_appearance._speed_btns[SPEED_SLOW].click()
+            dlg._save()
+
+            assert len(saved_events) == 1
+            assert saved_events[0].theme == THEME_MIDNIGHT
+            assert saved_events[0].robot_speed == SPEED_SLOW
+            reloaded = AppSettings.load()
+            assert reloaded.theme == THEME_MIDNIGHT
+            assert reloaded.robot_speed == SPEED_SLOW
+            assert fake_settings_path.exists()
         finally:
             dlg.close()
 
@@ -304,6 +350,111 @@ class TestRobotOverlay:
             assert overlay._timer.isActive() is False
         finally:
             overlay.close()
+
+    def test_speed_profiles_and_theme_update(self, qapp):
+        overlay = RobotOverlay()
+        try:
+            overlay.set_speed(SPEED_SLOW)
+            overlay.set_targets([QPointF(1200, 800)], ["test.txt"])
+            start_x = overlay._rx
+            overlay._move_robot()
+            slow_step = abs(overlay._rx - start_x)
+
+            overlay.set_speed(SPEED_FAST)
+            overlay.set_targets([QPointF(1200, 800)], ["test.txt"])
+            overlay._rx = start_x
+            overlay._move_robot()
+            fast_step = abs(overlay._rx - start_x)
+
+            assert slow_step > 0
+            assert fast_step > slow_step
+
+            overlay.set_theme(THEME_LIGHT)
+            assert overlay._palette["surface"] == config.THEMES[THEME_LIGHT]["surface"]
+            overlay.set_theme(THEME_DARK)
+            assert overlay._palette["surface"] == config.THEMES[THEME_DARK]["surface"]
+        finally:
+            overlay.close()
+
+
+# ---------------------------------------------------------------------------
+# ControlPanel tests (unified draggable bar & themes)
+# ---------------------------------------------------------------------------
+
+class TestControlPanel:
+    def test_control_panel_drag_and_themes(self, qapp):
+        panel = ControlPanel(theme=THEME_DARK)
+        panel.show()
+        qapp.processEvents()
+        try:
+            assert panel.btn_start.text() == "Süpür"
+            assert panel.btn_settings.text() == "Ayarlar"
+            assert panel.btn_quit.text() == "Kapat"
+
+            # Apply all themes without errors
+            for t in (THEME_LIGHT, THEME_MIDNIGHT, THEME_DARK):
+                panel.apply_theme(t)
+                assert panel._pal["surface"] == config.THEMES[t]["surface"]
+
+            # Simulate mouse drag across toolbar
+            start_pos = panel.pos()
+            press_local = QPointF(10, 15)
+            press_global = QPointF(start_pos.x() + 10, start_pos.y() + 15)
+            ev_press = QMouseEvent(
+                QEvent.Type.MouseButtonPress,
+                press_local,
+                press_global,
+                Qt.MouseButton.LeftButton,
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+            )
+            panel.mousePressEvent(ev_press)
+
+            move_global = QPointF(press_global.x() - 120, press_global.y() + 80)
+            ev_move = QMouseEvent(
+                QEvent.Type.MouseMove,
+                press_local,
+                move_global,
+                Qt.MouseButton.LeftButton,
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+            )
+            panel.mouseMoveEvent(ev_move)
+
+            ev_rel = QMouseEvent(
+                QEvent.Type.MouseButtonRelease,
+                press_local,
+                move_global,
+                Qt.MouseButton.LeftButton,
+                Qt.MouseButton.NoButton,
+                Qt.KeyboardModifier.NoModifier,
+            )
+            panel.mouseReleaseEvent(ev_rel)
+
+            assert panel._user_moved is True
+            assert panel.pos() != start_pos
+        finally:
+            panel.close()
+
+
+# ---------------------------------------------------------------------------
+# ReportDialog theme tests
+# ---------------------------------------------------------------------------
+
+class TestReportDialogThemes:
+    @pytest.mark.parametrize("theme_name", [THEME_DARK, THEME_LIGHT, THEME_MIDNIGHT])
+    def test_report_dialog_renders_all_themes(self, qapp, isolated_env, theme_name):
+        tmp_path, _, fake_organized, _ = isolated_env
+        dlg = ReportDialog(
+            results=[_make_result(tmp_path, "a.pdf", "Belgeler", FileStatus.MOVED)],
+            elapsed=0.4,
+            target_root=fake_organized,
+            theme=theme_name,
+        )
+        try:
+            assert dlg._pal["bg"] == config.THEMES[theme_name]["bg"]
+        finally:
+            dlg.close()
 
 
 # ---------------------------------------------------------------------------

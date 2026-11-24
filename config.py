@@ -372,8 +372,8 @@ def get_category(extension: str) -> Category:
 # ---------------------------------------------------------------------------
 
 ROBOT_SIZE      = 64      # px
-ROBOT_SPEED_MIN = 2.0     # px / frame (en yavaş)
-ROBOT_SPEED_MAX = 7.0     # px / frame (en hızlı)
+ROBOT_SPEED_MIN = 1.3     # px / frame (varsayılan normal alt sınır)
+ROBOT_SPEED_MAX = 4.5     # px / frame (varsayılan normal üst sınır)
 ROBOT_FPS       = 60      # hedef kare hızı
 ROBOT_GRID_COLS = 6       # demo modda ızgara sütun sayısı
 ROBOT_GRID_ROWS = 4       # demo modda ızgara satır sayısı
@@ -381,6 +381,234 @@ ROBOT_GRID_ROWS = 4       # demo modda ızgara satır sayısı
 # Ekran kenarından bırakılacak boşluk (px)
 SCREEN_MARGIN_X = 120
 SCREEN_MARGIN_Y = 100
+
+# ---------------------------------------------------------------------------
+# Tema ve robot hızı seçenekleri
+# ---------------------------------------------------------------------------
+
+THEME_DARK     = "dark"
+THEME_LIGHT    = "light"
+THEME_MIDNIGHT = "midnight"
+VALID_THEMES   = (THEME_DARK, THEME_LIGHT, THEME_MIDNIGHT)
+
+SPEED_SLOW   = "slow"
+SPEED_NORMAL = "normal"
+SPEED_FAST   = "fast"
+VALID_SPEEDS = (SPEED_SLOW, SPEED_NORMAL, SPEED_FAST)
+
+# (min_px_per_frame, max_px_per_frame, distance_factor)
+ROBOT_SPEED_PARAMS: dict[str, tuple[float, float, float]] = {
+    SPEED_SLOW:   (0.8, 2.6, 0.032),
+    SPEED_NORMAL: (1.3, 4.5, 0.052),
+    SPEED_FAST:   (2.4, 7.5, 0.090),
+}
+
+
+def get_robot_speed_params(speed: Optional[str] = None) -> tuple[float, float, float]:
+    """Seçili hız profili için (min_hız, max_hız, mesafe_katsayısı) döndür."""
+    key = speed if speed in ROBOT_SPEED_PARAMS else SPEED_NORMAL
+    return ROBOT_SPEED_PARAMS[key]
+
+
+THEMES: dict[str, dict[str, str]] = {
+    THEME_DARK: {
+        "name":                 "Koyu",
+        "bg":                   "#1e1f22",
+        "surface":              "#2b2d31",
+        "surface2":             "#313338",
+        "section":              "#232428",
+        "hover":                "#35373c",
+        "pressed":              "#3f4147",
+        "sidebar_active":       "#383c54",
+        "sidebar_active_hover": "#414663",
+        "border":               "#3f4147",
+        "accent":               "#5865f2",
+        "accent_hover":         "#6475ff",
+        "accent_pressed":       "#4855d4",
+        "accent_fg":            "#ffffff",
+        "text":                 "#f2f3f5",
+        "text_body":            "#dcddde",
+        "muted":                "#b5bac1",
+        "dim":                  "#949ba4",
+        "disabled_bg":          "#23252a",
+        "disabled_fg":          "#5c6068",
+        "input_bg":             "#2b2d31",
+        "input_disabled_bg":    "#1a1b1e",
+        "chip_off_bg":          "#40444b",
+        "chip_off_hv":          "#4e5058",
+        "chip_off_pr":          "#35373c",
+        "chip_off_fg":          "#b5bac1",
+        "green_bg":             "#2d7d4b",
+        "green_hv":             "#348f56",
+        "green_pr":             "#25683e",
+        "green_fg":             "#57f287",
+        "blue_bg":              "#5865f2",
+        "blue_hv":              "#6475ff",
+        "blue_pr":              "#4855d4",
+        "blue_fg":              "#ffffff",
+        "red_bg":               "#8c2f30",
+        "red_hv":               "#9e3536",
+        "red_pr":               "#772728",
+        "red_fg":               "#fe4c43",
+        "skip_bg":              "#5c606b",
+        "skip_hv":              "#696d7a",
+        "skip_pr":              "#4e5058",
+        "skip_fg":              "#ffffff",
+        "warn_bg":              "#3b1f23",
+        "warn_border":          "#fe4c43",
+        "warn_text":            "#ffb3b0",
+        "toolbar_start_bg":     "#237a4b",
+        "toolbar_start_hv":     "#2c925b",
+        "toolbar_start_pr":     "#1c623c",
+        "toolbar_start_fg":     "#ffffff",
+        "toolbar_cancel_bg":    "#8c2f30",
+        "toolbar_cancel_hv":    "#a63738",
+        "toolbar_cancel_pr":    "#732526",
+        "toolbar_cancel_fg":    "#ffffff",
+        "toolbar_quit_hv":      "#8c2f30",
+        "toolbar_quit_pr":      "#732526",
+        "toolbar_quit_fg":      "#fe4c43",
+        "status_moved":         "#57f287",
+        "status_trashed":       "#5865f2",
+        "status_deleted":       "#ff9d4d",
+        "status_skipped":       "#b5bac1",
+        "status_failed":        "#fe4c43",
+    },
+    THEME_LIGHT: {
+        "name":                 "Açık",
+        "bg":                   "#f3f4f6",
+        "surface":              "#ffffff",
+        "surface2":             "#e5e7eb",
+        "section":              "#e8eaed",
+        "hover":                "#e5e7eb",
+        "pressed":              "#d1d5db",
+        "sidebar_active":       "#e0e7ff",
+        "sidebar_active_hover": "#c7d2fe",
+        "border":               "#d1d5db",
+        "accent":               "#4f46e5",
+        "accent_hover":         "#4338ca",
+        "accent_pressed":       "#3730a3",
+        "accent_fg":            "#ffffff",
+        "text":                 "#111827",
+        "text_body":            "#1f2937",
+        "muted":                "#4b5563",
+        "dim":                  "#6b7280",
+        "disabled_bg":          "#e5e7eb",
+        "disabled_fg":          "#9ca3af",
+        "input_bg":             "#ffffff",
+        "input_disabled_bg":    "#f3f4f6",
+        "chip_off_bg":          "#e5e7eb",
+        "chip_off_hv":          "#d1d5db",
+        "chip_off_pr":          "#cbd5e1",
+        "chip_off_fg":          "#374151",
+        "green_bg":             "#15803d",
+        "green_hv":             "#166534",
+        "green_pr":             "#14532d",
+        "green_fg":             "#ffffff",
+        "blue_bg":              "#4f46e5",
+        "blue_hv":              "#4338ca",
+        "blue_pr":              "#3730a3",
+        "blue_fg":              "#ffffff",
+        "red_bg":               "#b91c1c",
+        "red_hv":               "#991b1b",
+        "red_pr":               "#7f1d1d",
+        "red_fg":               "#ffffff",
+        "skip_bg":              "#4b5563",
+        "skip_hv":              "#374151",
+        "skip_pr":              "#1f2937",
+        "skip_fg":              "#ffffff",
+        "warn_bg":              "#fee2e2",
+        "warn_border":          "#dc2626",
+        "warn_text":            "#991b1b",
+        "toolbar_start_bg":     "#15803d",
+        "toolbar_start_hv":     "#166534",
+        "toolbar_start_pr":     "#14532d",
+        "toolbar_start_fg":     "#ffffff",
+        "toolbar_cancel_bg":    "#b91c1c",
+        "toolbar_cancel_hv":    "#991b1b",
+        "toolbar_cancel_pr":    "#7f1d1d",
+        "toolbar_cancel_fg":    "#ffffff",
+        "toolbar_quit_hv":      "#fee2e2",
+        "toolbar_quit_pr":      "#fecaca",
+        "toolbar_quit_fg":      "#b91c1c",
+        "status_moved":         "#15803d",
+        "status_trashed":       "#4f46e5",
+        "status_deleted":       "#c2410c",
+        "status_skipped":       "#4b5563",
+        "status_failed":        "#dc2626",
+    },
+    THEME_MIDNIGHT: {
+        "name":                 "Gece Mavisi",
+        "bg":                   "#0f172a",
+        "surface":              "#1e293b",
+        "surface2":             "#273549",
+        "section":              "#162032",
+        "hover":                "#2d3c54",
+        "pressed":              "#364763",
+        "sidebar_active":       "#1e3a5f",
+        "sidebar_active_hover": "#254773",
+        "border":               "#334155",
+        "accent":               "#38bdf8",
+        "accent_hover":         "#56ccf9",
+        "accent_pressed":       "#0ea5e9",
+        "accent_fg":            "#0f172a",
+        "text":                 "#f1f5f9",
+        "text_body":            "#e2e8f0",
+        "muted":                "#94a3b8",
+        "dim":                  "#64748b",
+        "disabled_bg":          "#162032",
+        "disabled_fg":          "#475569",
+        "input_bg":             "#1e293b",
+        "input_disabled_bg":    "#0f172a",
+        "chip_off_bg":          "#273549",
+        "chip_off_hv":          "#334155",
+        "chip_off_pr":          "#1e293b",
+        "chip_off_fg":          "#94a3b8",
+        "green_bg":             "#0f766e",
+        "green_hv":             "#115e59",
+        "green_pr":             "#134e4a",
+        "green_fg":             "#5eead4",
+        "blue_bg":              "#0284c7",
+        "blue_hv":              "#0369a1",
+        "blue_pr":              "#075985",
+        "blue_fg":              "#ffffff",
+        "red_bg":               "#9f1239",
+        "red_hv":               "#be123c",
+        "red_pr":               "#881337",
+        "red_fg":               "#fda4af",
+        "skip_bg":              "#475569",
+        "skip_hv":              "#64748b",
+        "skip_pr":              "#334155",
+        "skip_fg":              "#ffffff",
+        "warn_bg":              "#3b1222",
+        "warn_border":          "#f43f5e",
+        "warn_text":            "#fda4af",
+        "toolbar_start_bg":     "#0f766e",
+        "toolbar_start_hv":     "#0d9488",
+        "toolbar_start_pr":     "#115e59",
+        "toolbar_start_fg":     "#ffffff",
+        "toolbar_cancel_bg":    "#9f1239",
+        "toolbar_cancel_hv":    "#be123c",
+        "toolbar_cancel_pr":    "#881337",
+        "toolbar_cancel_fg":    "#ffffff",
+        "toolbar_quit_hv":      "#4c1428",
+        "toolbar_quit_pr":      "#6b1a36",
+        "toolbar_quit_fg":      "#fb7185",
+        "status_moved":         "#5eead4",
+        "status_trashed":       "#38bdf8",
+        "status_deleted":       "#fb923c",
+        "status_skipped":       "#94a3b8",
+        "status_failed":        "#fb7185",
+    },
+}
+
+
+def get_theme_palette(theme_name: Optional[str] = None) -> dict[str, str]:
+    """Belirtilen tema için opak renk paletini döndür."""
+    name = theme_name if theme_name is not None else get_settings().theme
+    if name not in THEMES:
+        name = THEME_DARK
+    return dict(THEMES[name])
 
 # ---------------------------------------------------------------------------
 # Atlanan dosya adları (taşınmamalı)
@@ -518,19 +746,29 @@ class AppSettings:
     permanent_delete_enabled : kalıcı silmeye izin ver (False=güvenli)
     skip_hidden_files        : nokta ile başlayan dosyaları atla
     confirm_before_start     : işleme başlamadan önce onay al
+    theme                    : "dark" | "light" | "midnight"
+    robot_speed              : "slow" | "normal" | "fast"
     """
     category_rules:           dict[str, str] = field(default_factory=dict)
     custom_target:            Optional[str]  = None
     permanent_delete_enabled: bool = False
     skip_hidden_files:        bool = True
     confirm_before_start:     bool = True
+    theme:                    str  = THEME_DARK
+    robot_speed:              str  = SPEED_NORMAL
 
     def __post_init__(self) -> None:
-        """Eksik kategorilere varsayılan ACTION_MOVE ata; boş hedefi temizle."""
+        """Eksik kategorilere varsayılan ACTION_MOVE ata; alanları doğrula."""
         if isinstance(self.custom_target, str):
             self.custom_target = self.custom_target.strip() or None
         elif self.custom_target is not None:
             self.custom_target = str(self.custom_target).strip() or None
+
+        if self.theme not in VALID_THEMES:
+            self.theme = THEME_DARK
+
+        if self.robot_speed not in VALID_SPEEDS:
+            self.robot_speed = SPEED_NORMAL
 
         for cat in CATEGORIES:
             self.category_rules.setdefault(cat.name, ACTION_MOVE)
@@ -578,6 +816,8 @@ class AppSettings:
             "permanent_delete_enabled": self.permanent_delete_enabled,
             "skip_hidden_files":        self.skip_hidden_files,
             "confirm_before_start":     self.confirm_before_start,
+            "theme":                    self.theme,
+            "robot_speed":              self.robot_speed,
         }
 
     @classmethod
@@ -590,11 +830,16 @@ class AppSettings:
         else:
             clean_target = None
 
+        raw_theme = str(data.get("theme", THEME_DARK)).strip().lower()
+        raw_speed = str(data.get("robot_speed", SPEED_NORMAL)).strip().lower()
+
         s = cls(
             custom_target=clean_target,
             permanent_delete_enabled=bool(data.get("permanent_delete_enabled", False)),
             skip_hidden_files=bool(data.get("skip_hidden_files", True)),
             confirm_before_start=bool(data.get("confirm_before_start", True)),
+            theme=raw_theme if raw_theme in VALID_THEMES else THEME_DARK,
+            robot_speed=raw_speed if raw_speed in VALID_SPEEDS else SPEED_NORMAL,
         )
 
         # Mevcut kategorileri koru, kaydedilen değerleri dikkatlice birleştir

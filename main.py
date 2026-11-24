@@ -17,8 +17,8 @@ import sys
 import time
 from typing import Optional
 
-from PyQt6.QtCore import Qt, QTimer, QObject, QRect, pyqtSignal
-from PyQt6.QtGui import QFont, QIcon
+from PyQt6.QtCore import Qt, QPoint, QTimer, QObject, QRect, pyqtSignal
+from PyQt6.QtGui import QColor, QFont, QIcon, QPainter, QBrush
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -41,154 +41,309 @@ from settings_dialog import SettingsDialog
 
 
 # ---------------------------------------------------------------------------
-# Sabitler (opak tema renkleri)
+# Sürükleme tutamacı ve Modern Tek Parça Kontrol Çubuğu
 # ---------------------------------------------------------------------------
 
-_BG_DARK        = "#1e1f22"
-_BG_CARD        = "#2b2d31"
-_BORDER_COLOR   = "#3f4147"
-_TEXT_PRIMARY   = "#dcddde"
-_TEXT_SECONDARY = "#b5bac1"
-_TEXT_MUTED     = "#949ba4"
-_ACCENT_BLUE    = "#5865f2"
-_ACCENT_GREEN   = "#57f287"
-_WARN_BG        = "#3b1f23"
-_WARN_BORDER    = "#fe4c43"
-_WARN_TEXT      = "#ffb3b0"
+class _DragGrip(QWidget):
+    """Kontrol çubuğunun sol kenarında 6 noktalı sürükleme tutamacı."""
 
+    def __init__(self, color: str, bg_color: str, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._dot_color = color
+        self._bg_color = bg_color
+        self.setFixedSize(22, 32)
+        self.setCursor(Qt.CursorShape.OpenHandCursor)
+        self.setToolTip("Kontrol çubuğunu sürükleyerek taşıyın")
 
-# ---------------------------------------------------------------------------
-# Yüzen Kontrol Paneli (> Süpür | İptal | Ayarlar | Kapat)
-# ---------------------------------------------------------------------------
+    def set_colors(self, dot_color: str, bg_color: str) -> None:
+        self._dot_color = dot_color
+        self._bg_color = bg_color
+        self.update()
+
+    def paintEvent(self, _event) -> None:  # type: ignore[override]
+        p = QPainter(self)
+        try:
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            p.fillRect(self.rect(), QColor(self._bg_color))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QBrush(QColor(self._dot_color)))
+            for row in range(3):
+                for col in range(2):
+                    x = 7 + col * 5
+                    y = 8 + row * 6
+                    p.drawEllipse(x, y, 3, 3)
+        finally:
+            p.end()
+
 
 class ControlPanel(QWidget):
-    """Ekranın sağ üst köşesinde yüzen kontrol şeridi."""
+    """
+    Tek birleşik, ince kenarlıklı, sürüklenebilir Windows 11 / Fluent tarzı
+    kompakt kontrol çubuğu.
+    """
 
     start_clicked    = pyqtSignal()
     cancel_clicked   = pyqtSignal()
     settings_clicked = pyqtSignal()
     quit_clicked     = pyqtSignal()
 
-    def __init__(self, parent: Optional[QWidget] = None) -> None:
+    def __init__(
+        self,
+        theme: Optional[str] = None,
+        parent: Optional[QWidget] = None,
+    ) -> None:
         super().__init__(parent)
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
             | Qt.WindowType.Tool
         )
-        # WA_TranslucentBackground yalnızca bu yüzen kontrol şeridinde kullanılır
+        # WA_TranslucentBackground yalnızca dış 10px yuvarlatılmış köşe kırpması içindir;
+        # içerideki tüm QSS renkleri %100 opaktır.
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(8)
+        self._pal = config.get_theme_palette(theme)
+        self._dragging = False
+        self._drag_offset = QPoint()
+        self._user_moved = False
 
-        # -- > Süpür -----------------------------------------------------
-        self.btn_start = QPushButton("> Süpür")
-        self.btn_start.setFixedHeight(42)
-        self.btn_start.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+        outer = QHBoxLayout(self)
+        outer.setContentsMargins(4, 4, 4, 4)
+        outer.setSpacing(0)
+
+        self._bar = QFrame()
+        self._bar.setObjectName("toolbar_card")
+        bar_lay = QHBoxLayout(self._bar)
+        bar_lay.setContentsMargins(6, 5, 6, 5)
+        bar_lay.setSpacing(4)
+
+        self._grip = _DragGrip(self._pal["muted"], self._pal["surface"], self._bar)
+
+        # -- Süpür -------------------------------------------------------
+        self.btn_start = QPushButton("Süpür")
+        self.btn_start.setFixedHeight(32)
+        self.btn_start.setFont(QFont("Segoe UI", 9, QFont.Weight.DemiBold))
         self.btn_start.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_start.setStyleSheet("""
-            QPushButton {
-                background: #28b464;
-                color: #ffffff;
-                border: 1px solid #50dc8c;
-                border-radius: 21px;
-                padding: 0 18px;
-            }
-            QPushButton:hover   { background: #37cd78; }
-            QPushButton:pressed { background: #1e9655; }
-            QPushButton:disabled {
-                background: #3c4155;
-                color: #969baf;
-                border: 1px solid #50556e;
-            }
-        """)
+
+        self._sep_start = self._make_divider()
 
         # -- İptal (yalnızca çalışma sırasında görünür/aktif) ------------
         self.btn_cancel = QPushButton("İptal")
-        self.btn_cancel.setFixedHeight(42)
-        self.btn_cancel.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+        self.btn_cancel.setFixedHeight(32)
+        self.btn_cancel.setFont(QFont("Segoe UI", 9, QFont.Weight.DemiBold))
         self.btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_cancel.setStyleSheet("""
-            QPushButton {
-                background: #d83c3e;
-                color: #ffffff;
-                border: 1px solid #f06e6e;
-                border-radius: 21px;
-                padding: 0 16px;
-            }
-            QPushButton:hover   { background: #e84e50; }
-            QPushButton:pressed { background: #b52e30; }
-            QPushButton:disabled {
-                background: #3c4155;
-                color: #969baf;
-                border: 1px solid #50556e;
-            }
-        """)
         self.btn_cancel.setEnabled(False)
         self.btn_cancel.hide()
 
+        self._sep_cancel = self._make_divider()
+        self._sep_cancel.hide()
+
         # -- Ayarlar -----------------------------------------------------
         self.btn_settings = QPushButton("Ayarlar")
-        self.btn_settings.setFixedHeight(42)
-        self.btn_settings.setFont(QFont("Segoe UI", 10))
+        self.btn_settings.setFixedHeight(32)
+        self.btn_settings.setFont(QFont("Segoe UI", 9, QFont.Weight.Medium))
         self.btn_settings.setToolTip("Ayarları Aç")
         self.btn_settings.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_settings.setStyleSheet("""
-            QPushButton {
-                background: #161a2a;
-                color: #b4c3eb;
-                border: 1px solid #465078;
-                border-radius: 21px;
-                padding: 0 14px;
-            }
-            QPushButton:hover {
-                background: #3778d7;
-                color: #ffffff;
-            }
-            QPushButton:pressed { background: #2b5ea8; }
-            QPushButton:disabled {
-                background: #2b2d31;
-                color: #72767d;
-                border: 1px solid #3f4147;
-            }
-        """)
+
+        self._sep_settings = self._make_divider()
 
         # -- Kapat -------------------------------------------------------
         self.btn_quit = QPushButton("Kapat")
-        self.btn_quit.setFixedHeight(42)
-        self.btn_quit.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+        self.btn_quit.setFixedHeight(32)
+        self.btn_quit.setFont(QFont("Segoe UI", 9, QFont.Weight.Medium))
         self.btn_quit.setToolTip("Uygulamayı Kapat")
         self.btn_quit.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_quit.setStyleSheet("""
-            QPushButton {
-                background: #161a2a;
-                color: #f06e6e;
-                border: 1px solid #5a323c;
-                border-radius: 21px;
-                padding: 0 14px;
-            }
-            QPushButton:hover {
-                background: #dc3c3c;
-                color: #ffffff;
-            }
-            QPushButton:pressed { background: #b02828; }
-        """)
 
-        for btn in (self.btn_start, self.btn_cancel, self.btn_settings, self.btn_quit):
-            layout.addWidget(btn)
+        bar_lay.addWidget(self._grip)
+        bar_lay.addWidget(self.btn_start)
+        bar_lay.addWidget(self._sep_start)
+        bar_lay.addWidget(self.btn_cancel)
+        bar_lay.addWidget(self._sep_cancel)
+        bar_lay.addWidget(self.btn_settings)
+        bar_lay.addWidget(self._sep_settings)
+        bar_lay.addWidget(self.btn_quit)
+
+        outer.addWidget(self._bar)
 
         self.btn_start.clicked.connect(self.start_clicked)
         self.btn_cancel.clicked.connect(self.cancel_clicked)
         self.btn_settings.clicked.connect(self.settings_clicked)
         self.btn_quit.clicked.connect(self.quit_clicked)
 
+        self._apply_palette(self._pal)
         self._reposition()
 
+    @staticmethod
+    def _make_divider() -> QFrame:
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.VLine)
+        sep.setFixedSize(1, 20)
+        return sep
+
+    def apply_theme(self, theme_name: str) -> None:
+        """Kontrol çubuğunu belirtilen opak temaya geçir."""
+        self._pal = config.get_theme_palette(theme_name)
+        self._apply_palette(self._pal)
+
+    def _apply_palette(self, p: dict[str, str]) -> None:
+        self._bar.setStyleSheet(f"""
+            QFrame#toolbar_card {{
+                background-color: {p['surface']};
+                border: 1px solid {p['border']};
+                border-radius: 10px;
+            }}
+        """)
+        self._grip.set_colors(p["muted"], p["surface"])
+
+        sep_qss = f"background-color: {p['border']}; border: none;"
+        self._sep_start.setStyleSheet(sep_qss)
+        self._sep_cancel.setStyleSheet(sep_qss)
+        self._sep_settings.setStyleSheet(sep_qss)
+
+        self.btn_start.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {p['toolbar_start_bg']};
+                color: {p['toolbar_start_fg']};
+                border: none;
+                border-radius: 6px;
+                padding: 0 14px;
+            }}
+            QPushButton:hover {{
+                background-color: {p['toolbar_start_hv']};
+                color: {p['toolbar_start_fg']};
+            }}
+            QPushButton:pressed {{
+                background-color: {p['toolbar_start_pr']};
+                color: {p['toolbar_start_fg']};
+            }}
+            QPushButton:disabled {{
+                background-color: {p['disabled_bg']};
+                color: {p['disabled_fg']};
+            }}
+        """)
+
+        self.btn_cancel.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {p['toolbar_cancel_bg']};
+                color: {p['toolbar_cancel_fg']};
+                border: none;
+                border-radius: 6px;
+                padding: 0 12px;
+            }}
+            QPushButton:hover {{
+                background-color: {p['toolbar_cancel_hv']};
+                color: {p['toolbar_cancel_fg']};
+            }}
+            QPushButton:pressed {{
+                background-color: {p['toolbar_cancel_pr']};
+                color: {p['toolbar_cancel_fg']};
+            }}
+            QPushButton:disabled {{
+                background-color: {p['disabled_bg']};
+                color: {p['disabled_fg']};
+            }}
+        """)
+
+        self.btn_settings.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {p['surface']};
+                color: {p['text']};
+                border: none;
+                border-radius: 6px;
+                padding: 0 12px;
+            }}
+            QPushButton:hover {{
+                background-color: {p['hover']};
+                color: {p['text']};
+            }}
+            QPushButton:pressed {{
+                background-color: {p['pressed']};
+                color: {p['text']};
+            }}
+            QPushButton:disabled {{
+                background-color: {p['surface']};
+                color: {p['disabled_fg']};
+            }}
+        """)
+
+        self.btn_quit.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {p['surface']};
+                color: {p['muted']};
+                border: none;
+                border-radius: 6px;
+                padding: 0 12px;
+            }}
+            QPushButton:hover {{
+                background-color: {p['toolbar_quit_hv']};
+                color: {p['toolbar_quit_fg']};
+            }}
+            QPushButton:pressed {{
+                background-color: {p['toolbar_quit_pr']};
+                color: {p['toolbar_quit_fg']};
+            }}
+            QPushButton:disabled {{
+                background-color: {p['surface']};
+                color: {p['disabled_fg']};
+            }}
+        """)
+
+    # ------------------------------------------------------------------
+    # Sürükleme (Fare ile ekranın istenilen yerine taşıma)
+    # ------------------------------------------------------------------
+
+    def mousePressEvent(self, event) -> None:  # type: ignore[override]
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._dragging = True
+            self._drag_offset = (
+                event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            )
+            self._grip.setCursor(Qt.CursorShape.ClosedHandCursor)
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # type: ignore[override]
+        if self._dragging and (event.buttons() & Qt.MouseButton.LeftButton):
+            gpos = event.globalPosition().toPoint()
+            target = gpos - self._drag_offset
+            clamped = self._clamp_to_screen(target, gpos)
+            self.move(clamped)
+            self._user_moved = True
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # type: ignore[override]
+        if event.button() == Qt.MouseButton.LeftButton and self._dragging:
+            self._dragging = False
+            self._grip.setCursor(Qt.CursorShape.OpenHandCursor)
+            self.unsetCursor()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def _clamp_to_screen(self, pos: QPoint, ref_global: Optional[QPoint] = None) -> QPoint:
+        screen = QApplication.screenAt(ref_global) if ref_global is not None else None
+        if screen is None:
+            screen = QApplication.primaryScreen()
+        if screen is None and QApplication.screens():
+            screen = QApplication.screens()[0]
+        geom = screen.availableGeometry() if screen is not None else QRect(0, 0, 1920, 1080)
+        max_x = max(geom.x(), geom.x() + geom.width() - self.width())
+        max_y = max(geom.y(), geom.y() + geom.height() - self.height())
+        return QPoint(
+            max(geom.x(), min(pos.x(), max_x)),
+            max(geom.y(), min(pos.y(), max_y)),
+        )
+
     def _reposition(self) -> None:
-        """Boyutu güncelleyip sağ üst köşeye güvenli şekilde yerleştir."""
+        """Boyutu güncelle; kullanıcı taşıdıysa mevcut konumu koruyarak ekrana sığdır."""
         self.adjustSize()
+        if self._user_moved:
+            self.move(self._clamp_to_screen(self.pos(), self.pos()))
+            return
         screen = QApplication.primaryScreen()
         if screen is None and QApplication.screens():
             screen = QApplication.screens()[0]
@@ -206,12 +361,14 @@ class ControlPanel(QWidget):
             self.btn_settings.setEnabled(False)
             self.btn_cancel.setEnabled(False)
             self.btn_cancel.hide()
+            self._sep_cancel.hide()
         else:
             self.btn_start.setEnabled(True)
-            self.btn_start.setText("> Süpür")
+            self.btn_start.setText("Süpür")
             self.btn_settings.setEnabled(True)
             self.btn_cancel.setEnabled(False)
             self.btn_cancel.hide()
+            self._sep_cancel.hide()
         self._reposition()
 
     def set_running_state(self, running: bool) -> None:
@@ -221,12 +378,14 @@ class ControlPanel(QWidget):
             self.btn_start.setText("Süpürülüyor...")
             self.btn_cancel.setEnabled(True)
             self.btn_cancel.show()
+            self._sep_cancel.show()
             self.btn_settings.setEnabled(False)
         else:
             self.btn_start.setEnabled(True)
-            self.btn_start.setText("> Süpür")
+            self.btn_start.setText("Süpür")
             self.btn_cancel.setEnabled(False)
             self.btn_cancel.hide()
+            self._sep_cancel.hide()
             self.btn_settings.setEnabled(True)
         self._reposition()
 
@@ -257,10 +416,12 @@ class _ConfirmCleanDialog(QDialog):
         skip_count: int,
         target_root: pathlib.Path,
         scan_result: ScanResult,
+        theme: Optional[str] = None,
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
         self._delete_count = delete_count
+        self._pal = config.get_theme_palette(theme)
         self._build_ui(
             move_count=move_count,
             trash_count=trash_count,
@@ -279,17 +440,18 @@ class _ConfirmCleanDialog(QDialog):
         target_root: pathlib.Path,
         scan_result: ScanResult,
     ) -> None:
+        p = self._pal
         self.setWindowTitle("Temizlik Onayı")
         self.setMinimumWidth(500)
         self.setWindowIcon(QIcon(str(config.get_asset_path("robot_supurge.png"))))
         self.setStyleSheet(f"""
             QDialog {{
-                background-color: {_BG_DARK};
-                color: {_TEXT_PRIMARY};
+                background-color: {p['bg']};
+                color: {p['text_body']};
             }}
             QLabel {{
-                background-color: {_BG_DARK};
-                color: {_TEXT_PRIMARY};
+                background-color: {p['bg']};
+                color: {p['text_body']};
             }}
         """)
 
@@ -300,7 +462,7 @@ class _ConfirmCleanDialog(QDialog):
         # Başlık
         title = QLabel("Temizlik İşlemi Özeti")
         title.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
-        title.setStyleSheet(f"background-color: {_BG_DARK}; color: {_TEXT_PRIMARY};")
+        title.setStyleSheet(f"background-color: {p['bg']}; color: {p['text']};")
         root.addWidget(title)
 
         subtitle = QLabel(
@@ -308,15 +470,15 @@ class _ConfirmCleanDialog(QDialog):
         )
         subtitle.setFont(QFont("Segoe UI", 9))
         subtitle.setWordWrap(True)
-        subtitle.setStyleSheet(f"background-color: {_BG_DARK}; color: {_TEXT_SECONDARY};")
+        subtitle.setStyleSheet(f"background-color: {p['bg']}; color: {p['muted']};")
         root.addWidget(subtitle)
 
         # Özet kartı
         summary_card = QFrame()
         summary_card.setStyleSheet(f"""
             QFrame {{
-                background-color: {_BG_CARD};
-                border: 1px solid {_BORDER_COLOR};
+                background-color: {p['surface']};
+                border: 1px solid {p['border']};
                 border-radius: 8px;
             }}
         """)
@@ -325,28 +487,28 @@ class _ConfirmCleanDialog(QDialog):
         card_layout.setSpacing(8)
 
         rows = [
-            ("Taşınacak dosya", f"{move_count}", _ACCENT_GREEN),
-            ("Çöp kutusuna gönderilecek", f"{trash_count}", "#7289da"),
-            ("Kalıcı olarak silinecek", f"{delete_count}", _WARN_BORDER if delete_count > 0 else _TEXT_SECONDARY),
-            ("Atlanacak (kategori kuralı)", f"{skip_count}", _TEXT_SECONDARY),
-            ("Tarama dışı bırakılan klasör", f"{len(scan_result.skipped_dirs)}", _TEXT_MUTED),
-            ("Tarama dışı gizli / sistem dosyası", f"{len(scan_result.skipped_names)}", _TEXT_MUTED),
+            ("Taşınacak dosya", f"{move_count}", p["status_moved"]),
+            ("Çöp kutusuna gönderilecek", f"{trash_count}", p["status_trashed"]),
+            ("Kalıcı olarak silinecek", f"{delete_count}", p["status_failed"] if delete_count > 0 else p["muted"]),
+            ("Atlanacak (kategori kuralı)", f"{skip_count}", p["muted"]),
+            ("Tarama dışı bırakılan klasör", f"{len(scan_result.skipped_dirs)}", p["dim"]),
+            ("Tarama dışı gizli / sistem dosyası", f"{len(scan_result.skipped_names)}", p["dim"]),
         ]
 
         for label_text, val_text, val_color in rows:
             row_w = QWidget()
-            row_w.setStyleSheet(f"background-color: {_BG_CARD};")
+            row_w.setStyleSheet(f"background-color: {p['surface']};")
             row_l = QHBoxLayout(row_w)
             row_l.setContentsMargins(0, 0, 0, 0)
 
             lbl_k = QLabel(label_text)
             lbl_k.setFont(QFont("Segoe UI", 10))
-            lbl_k.setStyleSheet(f"background-color: {_BG_CARD}; color: {_TEXT_PRIMARY}; border: none;")
+            lbl_k.setStyleSheet(f"background-color: {p['surface']}; color: {p['text']}; border: none;")
 
             lbl_v = QLabel(val_text)
             lbl_v.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
             lbl_v.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            lbl_v.setStyleSheet(f"background-color: {_BG_CARD}; color: {val_color}; border: none;")
+            lbl_v.setStyleSheet(f"background-color: {p['surface']}; color: {val_color}; border: none;")
 
             row_l.addWidget(lbl_k, 1)
             row_l.addWidget(lbl_v)
@@ -369,8 +531,8 @@ class _ConfirmCleanDialog(QDialog):
         notes_frame = QFrame()
         notes_frame.setStyleSheet(f"""
             QFrame {{
-                background-color: {_BG_CARD};
-                border: 1px solid {_BORDER_COLOR};
+                background-color: {p['surface']};
+                border: 1px solid {p['border']};
                 border-radius: 6px;
             }}
         """)
@@ -382,7 +544,7 @@ class _ConfirmCleanDialog(QDialog):
             lbl_note.setWordWrap(True)
             lbl_note.setFont(QFont("Segoe UI", 9))
             lbl_note.setStyleSheet(
-                f"background-color: {_BG_CARD}; color: {_TEXT_SECONDARY}; border: none;"
+                f"background-color: {p['surface']}; color: {p['muted']}; border: none;"
             )
             notes_layout.addWidget(lbl_note)
         root.addWidget(notes_frame)
@@ -393,8 +555,8 @@ class _ConfirmCleanDialog(QDialog):
             warn_frame = QFrame()
             warn_frame.setStyleSheet(f"""
                 QFrame {{
-                    background-color: {_WARN_BG};
-                    border: 1px solid {_WARN_BORDER};
+                    background-color: {p['warn_bg']};
+                    border: 1px solid {p['warn_border']};
                     border-radius: 8px;
                 }}
             """)
@@ -409,7 +571,7 @@ class _ConfirmCleanDialog(QDialog):
             lbl_warn.setWordWrap(True)
             lbl_warn.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
             lbl_warn.setStyleSheet(
-                f"background-color: {_WARN_BG}; color: {_WARN_TEXT}; border: none;"
+                f"background-color: {p['warn_bg']}; color: {p['warn_text']}; border: none;"
             )
             warn_layout.addWidget(lbl_warn)
 
@@ -417,20 +579,20 @@ class _ConfirmCleanDialog(QDialog):
             self._chk_confirm_delete.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
             self._chk_confirm_delete.setStyleSheet(f"""
                 QCheckBox {{
-                    background-color: {_WARN_BG};
-                    color: {_TEXT_PRIMARY};
+                    background-color: {p['warn_bg']};
+                    color: {p['text']};
                     spacing: 8px;
                 }}
                 QCheckBox::indicator {{
                     width: 16px;
                     height: 16px;
-                    border: 1px solid {_WARN_BORDER};
+                    border: 1px solid {p['warn_border']};
                     border-radius: 3px;
-                    background-color: {_BG_DARK};
+                    background-color: {p['bg']};
                 }}
                 QCheckBox::indicator:checked {{
-                    background-color: {_WARN_BORDER};
-                    border: 1px solid {_WARN_BORDER};
+                    background-color: {p['warn_border']};
+                    border: 1px solid {p['warn_border']};
                 }}
             """)
             warn_layout.addWidget(self._chk_confirm_delete)
@@ -447,14 +609,14 @@ class _ConfirmCleanDialog(QDialog):
         btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_cancel.setStyleSheet(f"""
             QPushButton {{
-                background-color: #35373c;
-                color: {_TEXT_PRIMARY};
-                border: 1px solid {_BORDER_COLOR};
+                background-color: {p['hover']};
+                color: {p['text']};
+                border: 1px solid {p['border']};
                 border-radius: 6px;
                 padding: 0 16px;
             }}
-            QPushButton:hover   {{ background-color: #40444b; }}
-            QPushButton:pressed {{ background-color: #2b2d31; }}
+            QPushButton:hover   {{ background-color: {p['pressed']}; }}
+            QPushButton:pressed {{ background-color: {p['surface']}; }}
         """)
         btn_cancel.clicked.connect(self.reject)
 
@@ -465,17 +627,17 @@ class _ConfirmCleanDialog(QDialog):
         self._btn_start.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_start.setStyleSheet(f"""
             QPushButton {{
-                background-color: #28b464;
-                color: #ffffff;
+                background-color: {p['toolbar_start_bg']};
+                color: {p['toolbar_start_fg']};
                 border: none;
                 border-radius: 6px;
                 padding: 0 18px;
             }}
-            QPushButton:hover   {{ background-color: #37cd78; }}
-            QPushButton:pressed {{ background-color: #1e9655; }}
+            QPushButton:hover   {{ background-color: {p['toolbar_start_hv']}; }}
+            QPushButton:pressed {{ background-color: {p['toolbar_start_pr']}; }}
             QPushButton:disabled {{
-                background-color: #35373c;
-                color: #72767d;
+                background-color: {p['disabled_bg']};
+                color: {p['disabled_fg']};
             }}
         """)
         self._btn_start.clicked.connect(self.accept)
@@ -538,7 +700,7 @@ class Controller(QObject):
         self._robot = RobotOverlay()
 
         # Kontrol paneli -- henüz gizli
-        self._panel = ControlPanel()
+        self._panel = ControlPanel(theme=config.get_settings().theme)
         self._panel.start_clicked.connect(self._start_scan)
         self._panel.cancel_clicked.connect(self._cancel_cleaning)
         self._panel.settings_clicked.connect(self._open_settings)
@@ -561,6 +723,8 @@ class Controller(QObject):
         """Uygulama ilk açıldığında ayarları göster."""
         dlg = SettingsDialog(config.get_settings())
         dlg.settings_saved.connect(self._on_settings_saved)
+        dlg.theme_preview_requested.connect(self._on_theme_preview)
+        dlg.rejected.connect(self._on_settings_rejected)
         dlg.finished.connect(self._on_startup_settings_closed)
         self._settings_dlg = dlg
         dlg.show()
@@ -572,7 +736,7 @@ class Controller(QObject):
         self._panel.show()
 
     # ------------------------------------------------------------------
-    # Çalışma sırasında ayarlar
+    # Çalışma sırasında ayarlar & canlı tema/hız güncelleme
     # ------------------------------------------------------------------
 
     def _open_settings(self) -> None:
@@ -585,9 +749,23 @@ class Controller(QObject):
             return
         self._settings_dlg = SettingsDialog(config.get_settings())
         self._settings_dlg.settings_saved.connect(self._on_settings_saved)
+        self._settings_dlg.theme_preview_requested.connect(self._on_theme_preview)
+        self._settings_dlg.rejected.connect(self._on_settings_rejected)
         self._settings_dlg.show()
 
+    def _on_theme_preview(self, theme_name: str) -> None:
+        self._panel.apply_theme(theme_name)
+        self._robot.set_theme(theme_name)
+
+    def _on_settings_rejected(self) -> None:
+        saved_theme = config.get_settings().theme
+        self._panel.apply_theme(saved_theme)
+        self._robot.set_theme(saved_theme)
+
     def _on_settings_saved(self, new_settings: config.AppSettings) -> None:
+        self._panel.apply_theme(new_settings.theme)
+        self._robot.set_theme(new_settings.theme)
+        self._robot.set_speed(new_settings.robot_speed)
         self._robot.set_status("Ayarlar kaydedildi!")
 
     # ------------------------------------------------------------------
@@ -711,6 +889,7 @@ class Controller(QObject):
                 skip_count=skip_count,
                 target_root=target_root,
                 scan_result=raw_result,
+                theme=settings.theme,
                 parent=None,
             )
             if dlg.exec() != QDialog.DialogCode.Accepted:
@@ -838,16 +1017,18 @@ class Controller(QObject):
             elapsed,
             self._target_root,
             scan_result=self._raw_scan,
+            theme=config.get_settings().theme,
         )
         self._report.closed.connect(self._quit)
         self._report.show()
 
     # ------------------------------------------------------------------
-    # Yardımcı: opak koyu hata penceresi
+    # Yardımcı: opak tema uyumlu hata penceresi
     # ------------------------------------------------------------------
 
     @staticmethod
     def _show_critical(title: str, message: str) -> None:
+        p = config.get_theme_palette()
         box = QMessageBox()
         box.setIcon(QMessageBox.Icon.Critical)
         box.setWindowTitle(title)
@@ -856,23 +1037,23 @@ class Controller(QObject):
         box.setWindowIcon(QIcon(str(config.get_asset_path("robot_supurge.png"))))
         box.setStyleSheet(f"""
             QMessageBox {{
-                background-color: {_BG_DARK};
-                color: {_TEXT_PRIMARY};
+                background-color: {p['bg']};
+                color: {p['text']};
             }}
             QLabel {{
-                background-color: {_BG_DARK};
-                color: {_TEXT_PRIMARY};
+                background-color: {p['bg']};
+                color: {p['text']};
             }}
             QPushButton {{
-                background-color: #35373c;
-                color: {_TEXT_PRIMARY};
-                border: 1px solid {_BORDER_COLOR};
+                background-color: {p['hover']};
+                color: {p['text']};
+                border: 1px solid {p['border']};
                 border-radius: 5px;
                 padding: 6px 18px;
                 min-width: 70px;
             }}
-            QPushButton:hover   {{ background-color: #40444b; }}
-            QPushButton:pressed {{ background-color: #2b2d31; }}
+            QPushButton:hover   {{ background-color: {p['pressed']}; }}
+            QPushButton:pressed {{ background-color: {p['surface']}; }}
         """)
         box.exec()
 
